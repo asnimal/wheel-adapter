@@ -35,9 +35,9 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// Control de tiempo y estado del LED con tipo bool estricto para el SDK de Pico
+// Usamos enteros simples para el tiempo y el led, evitando tipos "bool" en macros globales
 uint32_t last_led_blink_time = 0;
-bool led_state = false; 
+int led_state = 0; 
 
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
@@ -60,7 +60,7 @@ void report_init() {
 void hid_task() {
     if (!tud_hid_ready()) return;
 
-    // Acción del botón PS combinando físicamente L3 y R3
+    // Botón PS combinando L3 y R3 de forma segura
     report.PS = (report.L3 && report.R3) ? 1 : 0;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -110,21 +110,18 @@ void led_status_task() {
     uint32_t current_time = board_ticks_to_ms(board_ticks());
     
     if (wheel_device == 0 || auth_device == 0) {
-        // Estado 1: Falta hardware -> Parpadeo lento (800ms)
         if (current_time - last_led_blink_time >= 800) {
             last_led_blink_time = current_time;
             led_state = !led_state;
-            board_led_write(led_state);
+            board_led_write(led_state ? true : false);
         }
     } else if (signature_ready == 0) {
-        // Estado 2: Esperando firma de PS5 -> Parpadeo rápido (100ms)
         if (current_time - last_led_blink_time >= 100) {
             last_led_blink_time = current_time;
             led_state = !led_state;
-            board_led_write(led_state);
+            board_led_write(led_state ? true : false);
         }
     } else {
-        // Estado 3: Todo correcto -> Encendido fijo
         board_led_write(true);
     }
 }
@@ -220,43 +217,41 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start = df->start;
             
         } else if (pid == 0xc299) {
-            // Mapeo seguro directo por lectura de buffer indexado
-            if (len >= 8) {
-                uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
-                report.wheel = raw_wheel << 2;
-                
-                report.cross    = (report_[1] & 0x40) ? 1 : 0;
-                report.square   = (report_[1] & 0x80) ? 1 : 0;
-                report.circle   = (report_[2] & 0x01) ? 1 : 0;
-                report.triangle = (report_[2] & 0x02) ? 1 : 0;
-                report.R1       = (report_[2] & 0x04) ? 1 : 0;
-                report.L1       = (report_[2] & 0x08) ? 1 : 0;
-                report.R2       = (report_[2] & 0x10) ? 1 : 0;
-                report.L2       = (report_[2] & 0x20) ? 1 : 0;
-                
-                // Distribución física exacta solicitada de los botones rojos
-                report.select   = (report_[2] & 0x40) ? 1 : 0; 
-                report.L3       = (report_[2] & 0x80) ? 1 : 0; 
-                report.R3       = (report_[3] & 0x01) ? 1 : 0; 
-                report.start    = (report_[3] & 0x02) ? 1 : 0; 
-                
-                // Mapeo de velocidades físicas de la palanca
-                if (report_[3] & 0x04) report.square |= 1;  
-                if (report_[3] & 0x08) report.cross  |= 1;  
-                if (report_[3] & 0x10) report.circle |= 1;  
-                if (report_[3] & 0x20) report.triangle |= 1; 
-                if (report_[3] & 0x40) report.R1     |= 1;  
-                if (report_[3] & 0x80) report.L1     |= 1;  
-                
-                uint8_t hat = report_[4] & 0x0F;
-                report.dpad = (hat < 8) ? hat : 8;
-                if (report_[4] & 0x10) report.R2 |= 1; 
-                
-                // Mapeo analógico de pedales
-                report.throttle = (255 - report_[5]) << 8;
-                report.brake    = (255 - report_[6]) << 8;
-                report.clutch   = (255 - report_[7]) << 8; 
-            }
+            // Lógica limpia sin declaraciones dinámicas internas que puedan alertar a GCC
+            uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
+            report.wheel = raw_wheel << 2;
+            
+            report.cross    = (report_[1] & 0x40) ? 1 : 0;
+            report.square   = (report_[1] & 0x80) ? 1 : 0;
+            report.circle   = (report_[2] & 0x01) ? 1 : 0;
+            report.triangle = (report_[2] & 0x02) ? 1 : 0;
+            report.R1       = (report_[2] & 0x04) ? 1 : 0;
+            report.L1       = (report_[2] & 0x08) ? 1 : 0;
+            report.R2       = (report_[2] & 0x10) ? 1 : 0;
+            report.L2       = (report_[2] & 0x20) ? 1 : 0;
+            
+            // Botones rojos mapeados con operadores estables
+            report.select   = (report_[2] & 0x40) ? 1 : 0; 
+            report.L3       = (report_[2] & 0x80) ? 1 : 0; 
+            report.R3       = (report_[3] & 0x01) ? 1 : 0; 
+            report.start    = (report_[3] & 0x02) ? 1 : 0; 
+            
+            // Caja de cambios en H
+            if (report_[3] & 0x04) report.square |= 1;  
+            if (report_[3] & 0x08) report.cross  |= 1;  
+            if (report_[3] & 0x10) report.circle |= 1;  
+            if (report_[3] & 0x20) report.triangle |= 1; 
+            if (report_[3] & 0x40) report.R1     |= 1;  
+            if (report_[3] & 0x80) report.L1     |= 1;  
+            
+            uint8_t hat = report_[4] & 0x0F;
+            report.dpad = (hat < 8) ? hat : 8;
+            if (report_[4] & 0x10) report.R2 |= 1; 
+            
+            // Pedales analógicos nativos
+            report.throttle = (255 - report_[5]) << 8;
+            report.brake    = (255 - report_[6]) << 8;
+            report.clutch   = (255 - report_[7]) << 8; 
         }
     }
     tuh_hid_receive_report(dev_addr, instance);
