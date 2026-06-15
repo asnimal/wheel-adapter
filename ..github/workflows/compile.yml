@@ -1,0 +1,32 @@
+name: Compilar Firmware G25
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout del código
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Instalar herramientas de compilación
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
+
+    - name: Configurar y Compilar
+      run: |
+        mkdir build
+        cd build
+        cmake ..
+        make
+
+    - name: Guardar el archivo UF2
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-g25-ps5
+        path: build/src/adapter.uf2
