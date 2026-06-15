@@ -25,8 +25,9 @@ jobs:
         cmake ..
         make
 
-    - name: Guardar el archivo UF2
+    - name: Guardar el archivo UF2 (Búsqueda Universal)
       uses: actions/upload-artifact@v4
       with:
         name: firmware-g25-ps5
-        path: build/src/adapter.uf2
+        path: |
+          build/**/*.uf2
