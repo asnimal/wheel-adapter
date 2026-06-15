@@ -36,7 +36,7 @@ g29_report_t report;
 g29_report_t prev_report;
 
 uint32_t last_led_blink_time = 0;
-bool led_state = false;
+uint8_t led_state = 0; // Cambiado a uint8_t para máxima compatibilidad con la API de Pico
 
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
@@ -110,17 +110,17 @@ void led_status_task() {
     if (!wheel_device || !auth_device) {
         if (current_time - last_led_blink_time >= 800) {
             last_led_blink_time = current_time;
-            led_state = !led_state;
+            led_state = led_state ? 0 : 1;
             board_led_write(led_state);
         }
     } else if (!signature_ready) {
         if (current_time - last_led_blink_time >= 100) {
             last_led_blink_time = current_time;
-            led_state = !led_state;
+            led_state = led_state ? 0 : 1;
             board_led_write(led_state);
         }
     } else {
-        board_led_write(true);
+        board_led_write(1);
     }
 }
 
@@ -217,43 +217,50 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start = df->start;
             
         } else if (pid == 0xc299) {
-            g25_native_report_t* g25 = (g25_native_report_t*) report_;
+            // LECTURA DIRECTA DESDE BUFFER DE MEMORIA (Máxima compatibilidad con el compilador de C)
+            uint8_t const* d = report_;
             
-            uint16_t raw_wheel = g25->wheel_low | ((g25->wheel_high & 0x3F) << 8);
+            // Volante 14 bits nativos
+            uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2;
             
-            report.throttle = (255 - g25->throttle) << 8;
-            report.brake    = (255 - g25->brake) << 8;
-            report.clutch   = (255 - g25->clutch) << 8; 
+            // Pedales (0-255 invertidos para el estándar de PS5)
+            report.throttle = (255 - d[6]) << 8;
+            report.brake    = (255 - d[7]) << 8;
+            if (len >= 9) {
+                report.clutch = (255 - d[8]) << 8; 
+            }
             
-            uint8_t hat = g25->hat_and_reverse & 0x0F;
+            // D-Pad de la palanca
+            uint8_t hat = d[5] & 0x0F;
             report.dpad = (hat < 8) ? hat : 8;
             
-            report.cross    = (g25->wheel_high & 0x40) ? 1 : 0;
-            report.square   = (g25->wheel_high & 0x80) ? 1 : 0;
-            report.circle   = (g25->buttons1 & 0x01) ? 1 : 0;
-            report.triangle = (g25->buttons1 & 0x02) ? 1 : 0;
-            report.R1       = (g25->buttons1 & 0x04) ? 1 : 0;
-            report.L1       = (g25->buttons1 & 0x08) ? 1 : 0;
-            report.R2       = (g25->buttons1 & 0x10) ? 1 : 0;
-            report.L2       = (g25->buttons1 & 0x20) ? 1 : 0;
+            // Botones del Aro y Levas
+            report.cross    = (d[1] & 0x40) ? 1 : 0;
+            report.square   = (d[1] & 0x80) ? 1 : 0;
+            report.circle   = (d[2] & 0x01) ? 1 : 0;
+            report.triangle = (d[2] & 0x02) ? 1 : 0;
+            report.R1       = (d[2] & 0x04) ? 1 : 0;
+            report.L1       = (d[2] & 0x08) ? 1 : 0;
+            report.R2       = (d[2] & 0x10) ? 1 : 0;
+            report.L2       = (d[2] & 0x20) ? 1 : 0;
             
-            // MAPEO CORRECTO Y SEGURO DE BOTONES ROJOS (Izquierda a Derecha)
-            report.select   = (g25->buttons1 & 0x40) ? 1 : 0; // 1º Izquierda
-            report.L3       = (g25->buttons1 & 0x80) ? 1 : 0; // 2º Centro-Izquierda (L3)
-            report.R3       = (g25->buttons2 & 0x01) ? 1 : 0; // 3º Centro-Derecha (R3)
-            report.start    = (g25->buttons2 & 0x02) ? 1 : 0; // 4º Derecha
+            // REORGANIZACIÓN SOLICITADA DE LOS BOTONES ROJOS (De Izquierda a Derecha)
+            report.select   = (d[2] & 0x40) ? 1 : 0; // 1º Izquierda -> SELECT
+            report.L3       = (d[2] & 0x80) ? 1 : 0; // 2º Centro-Izquierda -> L3 (Físico)
+            report.R3       = (d[3] & 0x01) ? 1 : 0; // 3º Centro-Derecha -> R3 (Físico)
+            report.start    = (d[3] & 0x02) ? 1 : 0; // 4º Derecha -> START
             
-            // Marchas (1ª a 6ª)
-            if (g25->buttons2 & 0x04) report.square |= 1;  
-            if (g25->buttons2 & 0x08) report.cross  |= 1;  
-            if (g25->buttons2 & 0x10) report.circle |= 1;  
-            if (g25->buttons2 & 0x20) report.triangle|= 1; 
-            if (g25->buttons2 & 0x40) report.R1     |= 1;  
-            if (g25->buttons2 & 0x80) report.L1     |= 1;  
+            // Palanca de cambios en H (Decodificación limpia por desplazamiento nativo)
+            if (d[3] & 0x04) report.square |= 1;  // 1ª Marcha
+            if (d[3] & 0x08) report.cross  |= 1;  // 2ª Marcha
+            if (d[3] & 0x10) report.circle |= 1;  // 3ª Marcha
+            if (d[3] & 0x20) report.triangle|= 1; // 4ª Marcha
+            if (d[3] & 0x40) report.R1     |= 1;  // 5ª Marcha
+            if (d[3] & 0x80) report.L1     |= 1;  // 6ª Marcha
             
-            // Marcha atrás en el bloque modificado
-            if (g25->hat_and_reverse & 0x10) report.R2 |= 1;  
+            // Marcha atrás (Pulsando hacia abajo)
+            if (d[5] & 0x10) report.R2 |= 1;  
         }
     }
     tuh_hid_receive_report(dev_addr, instance);
