@@ -35,9 +35,9 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// Variables de control de tiempo del LED (Idénticas a formatos nativos de tiempo)
+// Control de tiempo y estado del LED con tipo bool estricto para el SDK de Pico
 uint32_t last_led_blink_time = 0;
-uint8_t led_state = 0; 
+bool led_state = false; 
 
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
@@ -60,7 +60,7 @@ void report_init() {
 void hid_task() {
     if (!tud_hid_ready()) return;
 
-    // L3 + R3 físico (botones centrales rojos) activan el botón PS hacia la PS5
+    // Acción del botón PS combinando físicamente L3 y R3
     report.PS = (report.L3 && report.R3) ? 1 : 0;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -110,22 +110,22 @@ void led_status_task() {
     uint32_t current_time = board_ticks_to_ms(board_ticks());
     
     if (wheel_device == 0 || auth_device == 0) {
-        // 1. Parpadeo lento (800ms) si falta algún dispositivo
+        // Estado 1: Falta hardware -> Parpadeo lento (800ms)
         if (current_time - last_led_blink_time >= 800) {
             last_led_blink_time = current_time;
-            led_state = (led_state == 0) ? 1 : 0;
+            led_state = !led_state;
             board_led_write(led_state);
         }
     } else if (signature_ready == 0) {
-        // 2. Parpadeo rápido (100ms) si están conectados pero falta autenticación
+        // Estado 2: Esperando firma de PS5 -> Parpadeo rápido (100ms)
         if (current_time - last_led_blink_time >= 100) {
             last_led_blink_time = current_time;
-            led_state = (led_state == 0) ? 1 : 0;
+            led_state = !led_state;
             board_led_write(led_state);
         }
     } else {
-        // 3. Encendido fijo al estar todo correcto
-        board_led_write(1);
+        // Estado 3: Todo correcto -> Encendido fijo
+        board_led_write(true);
     }
 }
 
@@ -220,13 +220,11 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start = df->start;
             
         } else if (pid == 0xc299) {
-            // MAPEO SEGURO MEDIANTE BUFFER CON CONTROL DE LONGITUD DE SEGURIDAD
+            // Mapeo seguro directo por lectura de buffer indexado
             if (len >= 8) {
-                // Volante Real de 14 bits (Bytes 0 y 1)
                 uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
                 report.wheel = raw_wheel << 2;
                 
-                // Botones del Aro y Dirección de palanca
                 report.cross    = (report_[1] & 0x40) ? 1 : 0;
                 report.square   = (report_[1] & 0x80) ? 1 : 0;
                 report.circle   = (report_[2] & 0x01) ? 1 : 0;
@@ -236,13 +234,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.R2       = (report_[2] & 0x10) ? 1 : 0;
                 report.L2       = (report_[2] & 0x20) ? 1 : 0;
                 
-                // REORGANIZACIÓN DE BOTONES ROJOS DE LA PALANCA (De Izquierda a Derecha)
-                report.select   = (report_[2] & 0x40) ? 1 : 0; // 1º Izquierda -> SELECT
-                report.L3       = (report_[2] & 0x80) ? 1 : 0; // 2º Centro-Izquierda -> L3
-                report.R3       = (report_[3] & 0x01) ? 1 : 0; // 3º Centro-Derecha -> R3
-                report.start    = (report_[3] & 0x02) ? 1 : 0; // 4º Derecha -> START
+                // Distribución física exacta solicitada de los botones rojos
+                report.select   = (report_[2] & 0x40) ? 1 : 0; 
+                report.L3       = (report_[2] & 0x80) ? 1 : 0; 
+                report.R3       = (report_[3] & 0x01) ? 1 : 0; 
+                report.start    = (report_[3] & 0x02) ? 1 : 0; 
                 
-                // Palanca en H (Marchas de 1 a 6)
+                // Mapeo de velocidades físicas de la palanca
                 if (report_[3] & 0x04) report.square |= 1;  
                 if (report_[3] & 0x08) report.cross  |= 1;  
                 if (report_[3] & 0x10) report.circle |= 1;  
@@ -250,12 +248,11 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 if (report_[3] & 0x40) report.R1     |= 1;  
                 if (report_[3] & 0x80) report.L1     |= 1;  
                 
-                // D-Pad e inversor de Marcha Atrás (Byte 4)
                 uint8_t hat = report_[4] & 0x0F;
                 report.dpad = (hat < 8) ? hat : 8;
                 if (report_[4] & 0x10) report.R2 |= 1; 
                 
-                // Pedales Nativos Analógicos (Acelerador, Freno y Embrague)
+                // Mapeo analógico de pedales
                 report.throttle = (255 - report_[5]) << 8;
                 report.brake    = (255 - report_[6]) << 8;
                 report.clutch   = (255 - report_[7]) << 8; 
