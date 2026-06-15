@@ -35,8 +35,9 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
+// Variables de control de tiempo del LED (Idénticas a formatos nativos de tiempo)
 uint32_t last_led_blink_time = 0;
-uint8_t led_state = 0; // Cambiado a uint8_t para máxima compatibilidad con la API de Pico
+uint8_t led_state = 0; 
 
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
@@ -59,6 +60,7 @@ void report_init() {
 void hid_task() {
     if (!tud_hid_ready()) return;
 
+    // L3 + R3 físico (botones centrales rojos) activan el botón PS hacia la PS5
     report.PS = (report.L3 && report.R3) ? 1 : 0;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -107,19 +109,22 @@ void auth_task() {
 void led_status_task() {
     uint32_t current_time = board_ticks_to_ms(board_ticks());
     
-    if (!wheel_device || !auth_device) {
+    if (wheel_device == 0 || auth_device == 0) {
+        // 1. Parpadeo lento (800ms) si falta algún dispositivo
         if (current_time - last_led_blink_time >= 800) {
             last_led_blink_time = current_time;
-            led_state = led_state ? 0 : 1;
+            led_state = (led_state == 0) ? 1 : 0;
             board_led_write(led_state);
         }
-    } else if (!signature_ready) {
+    } else if (signature_ready == 0) {
+        // 2. Parpadeo rápido (100ms) si están conectados pero falta autenticación
         if (current_time - last_led_blink_time >= 100) {
             last_led_blink_time = current_time;
-            led_state = led_state ? 0 : 1;
+            led_state = (led_state == 0) ? 1 : 0;
             board_led_write(led_state);
         }
     } else {
+        // 3. Encendido fijo al estar todo correcto
         board_led_write(1);
     }
 }
@@ -178,7 +183,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     if (vid == 0x046d && (pid == 0xc294 || pid == 0xc299)) { 
         wheel_device = dev_addr; wheel_instance = instance; 
         if (pid == 0xc299) initialized = true; 
-        
         tuh_hid_receive_report(dev_addr, instance);
     } else { 
         auth_device = dev_addr; auth_instance = instance; 
@@ -210,57 +214,52 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L1 = df->L1;
             report.R2 = df->R2;
             report.L2 = df->L2;
-            
             report.select = df->select;
             report.L3 = df->L3;
             report.R3 = df->R3;
             report.start = df->start;
             
         } else if (pid == 0xc299) {
-            // LECTURA DIRECTA DESDE BUFFER DE MEMORIA (Máxima compatibilidad con el compilador de C)
-            uint8_t const* d = report_;
-            
-            // Volante 14 bits nativos
-            uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
-            report.wheel = raw_wheel << 2;
-            
-            // Pedales (0-255 invertidos para el estándar de PS5)
-            report.throttle = (255 - d[6]) << 8;
-            report.brake    = (255 - d[7]) << 8;
-            if (len >= 9) {
-                report.clutch = (255 - d[8]) << 8; 
+            // MAPEO SEGURO MEDIANTE BUFFER CON CONTROL DE LONGITUD DE SEGURIDAD
+            if (len >= 8) {
+                // Volante Real de 14 bits (Bytes 0 y 1)
+                uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
+                report.wheel = raw_wheel << 2;
+                
+                // Botones del Aro y Dirección de palanca
+                report.cross    = (report_[1] & 0x40) ? 1 : 0;
+                report.square   = (report_[1] & 0x80) ? 1 : 0;
+                report.circle   = (report_[2] & 0x01) ? 1 : 0;
+                report.triangle = (report_[2] & 0x02) ? 1 : 0;
+                report.R1       = (report_[2] & 0x04) ? 1 : 0;
+                report.L1       = (report_[2] & 0x08) ? 1 : 0;
+                report.R2       = (report_[2] & 0x10) ? 1 : 0;
+                report.L2       = (report_[2] & 0x20) ? 1 : 0;
+                
+                // REORGANIZACIÓN DE BOTONES ROJOS DE LA PALANCA (De Izquierda a Derecha)
+                report.select   = (report_[2] & 0x40) ? 1 : 0; // 1º Izquierda -> SELECT
+                report.L3       = (report_[2] & 0x80) ? 1 : 0; // 2º Centro-Izquierda -> L3
+                report.R3       = (report_[3] & 0x01) ? 1 : 0; // 3º Centro-Derecha -> R3
+                report.start    = (report_[3] & 0x02) ? 1 : 0; // 4º Derecha -> START
+                
+                // Palanca en H (Marchas de 1 a 6)
+                if (report_[3] & 0x04) report.square |= 1;  
+                if (report_[3] & 0x08) report.cross  |= 1;  
+                if (report_[3] & 0x10) report.circle |= 1;  
+                if (report_[3] & 0x20) report.triangle |= 1; 
+                if (report_[3] & 0x40) report.R1     |= 1;  
+                if (report_[3] & 0x80) report.L1     |= 1;  
+                
+                // D-Pad e inversor de Marcha Atrás (Byte 4)
+                uint8_t hat = report_[4] & 0x0F;
+                report.dpad = (hat < 8) ? hat : 8;
+                if (report_[4] & 0x10) report.R2 |= 1; 
+                
+                // Pedales Nativos Analógicos (Acelerador, Freno y Embrague)
+                report.throttle = (255 - report_[5]) << 8;
+                report.brake    = (255 - report_[6]) << 8;
+                report.clutch   = (255 - report_[7]) << 8; 
             }
-            
-            // D-Pad de la palanca
-            uint8_t hat = d[5] & 0x0F;
-            report.dpad = (hat < 8) ? hat : 8;
-            
-            // Botones del Aro y Levas
-            report.cross    = (d[1] & 0x40) ? 1 : 0;
-            report.square   = (d[1] & 0x80) ? 1 : 0;
-            report.circle   = (d[2] & 0x01) ? 1 : 0;
-            report.triangle = (d[2] & 0x02) ? 1 : 0;
-            report.R1       = (d[2] & 0x04) ? 1 : 0;
-            report.L1       = (d[2] & 0x08) ? 1 : 0;
-            report.R2       = (d[2] & 0x10) ? 1 : 0;
-            report.L2       = (d[2] & 0x20) ? 1 : 0;
-            
-            // REORGANIZACIÓN SOLICITADA DE LOS BOTONES ROJOS (De Izquierda a Derecha)
-            report.select   = (d[2] & 0x40) ? 1 : 0; // 1º Izquierda -> SELECT
-            report.L3       = (d[2] & 0x80) ? 1 : 0; // 2º Centro-Izquierda -> L3 (Físico)
-            report.R3       = (d[3] & 0x01) ? 1 : 0; // 3º Centro-Derecha -> R3 (Físico)
-            report.start    = (d[3] & 0x02) ? 1 : 0; // 4º Derecha -> START
-            
-            // Palanca de cambios en H (Decodificación limpia por desplazamiento nativo)
-            if (d[3] & 0x04) report.square |= 1;  // 1ª Marcha
-            if (d[3] & 0x08) report.cross  |= 1;  // 2ª Marcha
-            if (d[3] & 0x10) report.circle |= 1;  // 3ª Marcha
-            if (d[3] & 0x20) report.triangle|= 1; // 4ª Marcha
-            if (d[3] & 0x40) report.R1     |= 1;  // 5ª Marcha
-            if (d[3] & 0x80) report.L1     |= 1;  // 6ª Marcha
-            
-            // Marcha atrás (Pulsando hacia abajo)
-            if (d[5] & 0x10) report.R2 |= 1;  
         }
     }
     tuh_hid_receive_report(dev_addr, instance);
