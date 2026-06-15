@@ -33,10 +33,14 @@ typedef struct __attribute__((packed)) {
     uint8_t whatever2[13];
 } g29_report_t;
 
-// Estructura limpia para leer el G25 en bruto
+// Estructura híbrida para el G25 (Modo extendido real)
 typedef struct __attribute__((packed)) {
-    uint8_t report_id;
-    uint8_t data[12]; // Datos en bruto del volante
-} g25_raw_report_t;
+    uint16_t wheel : 14;
+    uint32_t buttons : 18;
+    uint8_t throttle;
+    uint8_t brake;
+    uint8_t clutch;
+    uint8_t dpad;
+} g25_report_t;
 
 #endif
