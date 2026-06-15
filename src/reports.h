@@ -56,18 +56,17 @@ typedef struct __attribute__((packed)) {
     uint8_t brake;
 } df_report_t;
 
-// NUEVA: Estructura nativa del Logitech G25 (Modo 0xc299)
+// Estructura limpia para el G25 Nativo sin campos de bits problemáticos
 typedef struct __attribute__((packed)) {
     uint8_t wheel_low;
-    uint8_t wheel_high : 6;
-    uint8_t buttons1 : 2; // Botones del aro
-    uint8_t buttons2;     // Botones del aro + Base
-    uint8_t buttons3;     // Botones de la palanca (Marchas 1-6)
-    uint8_t hat : 4;       // D-Pad de la palanca
-    uint8_t buttons4 : 4; // Marcha atrás y otros
-    uint8_t throttle;     // Acelerador (0-255)
-    uint8_t brake;        // Freno (0-255)
-    uint8_t clutch;       // Embrague (0-255)
+    uint8_t wheel_high;
+    uint8_t buttons1;     
+    uint8_t buttons2;     
+    uint8_t buttons3;     
+    uint8_t hat_and_reverse; 
+    uint8_t throttle;     
+    uint8_t brake;        
+    uint8_t clutch;       
 } g25_native_report_t;
 
 #endif
