@@ -46,7 +46,7 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// G29
+// G29 Output structure
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -73,7 +73,12 @@ void hid_task() {
         return;
     }
 
-    report.PS = report.select && report.start;
+    // CONFIGURACIÓN PERSONALIZADA: El botón PS se activa pulsando L3 y R3 a la vez
+    if (report.L3 && report.R3) {
+        report.PS = 1;
+    } else {
+        report.PS = 0;
+    }
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
@@ -91,7 +96,6 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // COMANDO MÁGICO: Despierta el modo G25 Nativo (con embrague y palanca)
         static uint8_t g25_native_mode[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, g25_native_mode, sizeof(g25_native_mode));
     }
@@ -112,7 +116,6 @@ void auth_task() {
                 set_buffer[2] = nonce_part;
                 set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                printf(".");
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
                 nonce_part++;
@@ -151,27 +154,22 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
         busy = false;
         switch (report_id) {
             case 0xF3:
-                printf("Sending nonce to auth controller");
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
-                    printf("\n");
-                    printf("Receiving signature from auth controller");
                 }
                 break;
             case 0xF1:
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
                 signature_part++;
-                printf(".");
                 if (signature_part == 19) {
                     state = IDLE;
                     expected_part = 0;
                     signature_ready = true;
                     signature_part = 0;
-                    printf("\n");
                 }
                 break;
         }
@@ -182,8 +180,6 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if ((dev_addr == auth_device) && (report_id == 0xF0)) {
         busy = false;
         if (nonce_part == 5) {
-            printf("\n");
-            printf("Waiting for auth controller to sign...\n");
             state = WAITING_FOR_SIG;
         }
     }
@@ -203,21 +199,15 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
-            if (signature_part == 0) {
-                printf("Sending signature to PS5");
-            }
-            printf(".");
             memcpy(&buffer[3], &signature[signature_part * 56], 56);
             signature_part++;
             if (signature_part == 19) {
                 signature_part = 0;
-                printf("\n");
                 board_led_write(true);
             }
             return reqlen;
         }
         case 0xF2: {
-            printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
             memset(&buffer[2], 0, 9);
@@ -234,10 +224,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        if (part == 0) {
-            printf("Getting nonce from PS5");
-        }
-        printf(".");
         if (part > 4) {
             return;
         }
@@ -245,8 +231,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
             nonce_ready = 1;
-            printf("\n");
-            printf("Sending reset to auth controller...\n");
             state = SENDING_RESET;
             nonce_part = 0;
         }
@@ -262,8 +246,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
-
     if ((vid == 0x046d) && (pid == 0xc294)) { 
         wheel_device = dev_addr;
         wheel_instance = instance;
@@ -276,7 +258,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    printf("tuh_hid_umount_cb\n");
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
@@ -292,39 +273,45 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         if (dev_addr == wheel_device) {
             g25_report_t* g25 = (g25_report_t*) report_;
             
-            // Mapeo de Ejes (G25 usa un rango de volante de 14 bits)
+            // Mapeo de Ejes (Volante, Acelerador, Freno y Embrague)
             report.wheel = g25->wheel << 2; 
             report.throttle = (255 - g25->throttle) << 8;
             report.brake = (255 - g25->brake) << 8;
-            report.clutch = (255 - g25->clutch) << 8; // ¡EMBRAGUE ACTIVADO!
+            report.clutch = (255 - g25->clutch) << 8; 
 
-            // Mapeo de la cruceta (D-Pad)
+            // Mapeo de la cruceta (D-Pad de la palanca)
             if (g25->dpad < 8) {
                 report.dpad = g25->dpad;
             } else {
                 report.dpad = 8;
             }
 
-            // Mapeo de Botones principales del G25 al G29
-            report.cross = (g25->buttons & 0x01) ? 1 : 0;
-            report.square = (g25->buttons & 0x02) ? 1 : 0;
-            report.circle = (g25->buttons & 0x04) ? 1 : 0;
-            report.triangle = (g25->buttons & 0x08) ? 1 : 0;
-            report.R1 = (g25->buttons & 0x10) ? 1 : 0; // Leva Derecha
-            report.L1 = (g25->buttons & 0x20) ? 1 : 0; // Leva Izquierda
-            report.R2 = (g25->buttons & 0x40) ? 1 : 0; 
-            report.L2 = (g25->buttons & 0x80) ? 1 : 0;
-            report.select = (g25->buttons & 0x100) ? 1 : 0;
-            report.start = (g25->buttons & 0x200) ? 1 : 0;
+            // Mapeo de Botones en el aro del volante del G25
+            report.cross = (g25->buttons & 0x0001) ? 1 : 0;    // Botón del aro derecho (Equis)
+            report.square = (g25->buttons & 0x0002) ? 1 : 0;   // Botón del aro izquierdo (Cuadrado)
+            report.R1 = (g25->buttons & 0x0010) ? 1 : 0;       // Leva Derecha
+            report.L1 = (g25->buttons & 0x0020) ? 1 : 0;       // Leva Izquierda
 
-            // MAPEO DE LA PALANCA EN H (Convertidos a botones de marcha del G29)
-            report.square |= (g25->buttons & 0x00010000) ? 1 : 0; // Marcha 1
-            report.cross  |= (g25->buttons & 0x00020000) ? 1 : 0; // Marcha 2
-            report.circle |= (g25->buttons & 0x00040000) ? 1 : 0; // Marcha 3
-            report.triangle|= (g25->buttons & 0x00080000) ? 1 : 0; // Marcha 4
-            report.R1     |= (g25->buttons & 0x00100000) ? 1 : 0; // Marcha 5
-            report.L1     |= (g25->buttons & 0x00200000) ? 1 : 0; // Marcha 6
-            report.R2     |= (g25->buttons & 0x00400000) ? 1 : 0; // Marcha Atrás
+            // MAPEO ORDENADO DE LOS 4 BOTONES ROJOS DE LA PALANCA (De izquierda a derecha):
+            report.select = (g25->buttons & 0x0040) ? 1 : 0;   // 1º Botón Rojo (Izquierda) -> SELECT / SHARE
+            report.L3 = (g25->buttons & 0x0080) ? 1 : 0;       // 2º Botón Rojo (Centro-Izquierda) -> L3
+            report.R3 = (g25->buttons & 0x0100) ? 1 : 0;       // 3º Botón Rojo (Centro-Derecha) -> R3
+            report.start = (g25->buttons & 0x0200) ? 1 : 0;    // 4º Botón Rojo (Derecha) -> START / OPTIONS
+
+            // Botones negros pequeños que quedan debajo de los rojos en la palanca
+            report.circle = (g25->buttons & 0x0400) ? 1 : 0;   
+            report.triangle = (g25->buttons & 0x0800) ? 1 : 0; 
+            report.L2 = (g25->buttons & 0x0004) ? 1 : 0;       
+            report.R2 = (g25->buttons & 0x0008) ? 1 : 0;       
+
+            // MAPEO DE LA PALANCA EN H (Marchas como botones virtuales para juegos de PS5)
+            if (g25->buttons & 0x00010000) report.square |= 1; // 1ª Marcha
+            if (g25->buttons & 0x00020000) report.cross |= 1;  // 2ª Marcha
+            if (g25->buttons & 0x00040000) report.circle |= 1; // 3ª Marcha
+            if (g25->buttons & 0x00080000) report.triangle |= 1;// 4ª Marcha
+            if (g25->buttons & 0x00100000) report.R1 |= 1;     // 5ª Marcha
+            if (g25->buttons & 0x00200000) report.L1 |= 1;     // 6ª Marcha
+            if (g25->buttons & 0x00400000) report.R2 |= 1;     // Marcha Atrás (R)
         }
     }
 
