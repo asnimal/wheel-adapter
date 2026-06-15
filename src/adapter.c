@@ -35,6 +35,10 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
+// Control de tiempo para los estados del LED
+uint32_t last_led_blink_time = 0;
+bool led_state = false;
+
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -49,14 +53,14 @@ const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 void report_init() {
     memset(&report, 0, sizeof(report));
     report.lx = 0x80; report.ly = 0x80; report.rx = 0x80; report.ry = 0x80;
-    report.clutch = 0xFFFF; // Estado inicial del embrague invertido
+    report.clutch = 0xFFFF; 
     memcpy(&prev_report, &report, sizeof(report));
 }
 
 void hid_task() {
     if (!tud_hid_ready()) return;
 
-    // BOTÓN PS: Creado matemáticamente con tus nuevos botones (L3 y R3)
+    // BOTÓN PS: Creado matemáticamente combinando L3 y R3 (los botones centrales rojos)
     report.PS = (report.L3 && report.R3) ? 1 : 0;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -75,7 +79,7 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Comando mágico: Activa el embrague, la palanca y los 14-bits (Cambia PID a 0xc299)
+        // Comando para despertar el G25 y habilitar el embrague/palanca
         static uint8_t g25_native_mode[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, g25_native_mode, sizeof(g25_native_mode));
     }
@@ -103,10 +107,35 @@ void auth_task() {
     }
 }
 
+// Control inteligente del LED basado en tus tres peticiones de velocidad
+void led_status_task() {
+    uint32_t current_time = board_ticks_to_ms(board_ticks());
+    
+    if (!wheel_device || !auth_device) {
+        // RITMO 1: No detecta volante O no detecta mando licenciado -> PARPADEO LENTO (800ms)
+        if (current_time - last_led_blink_time >= 800) {
+            last_led_blink_time = current_time;
+            led_state = !led_state;
+            board_led_write(led_state);
+        }
+    } else if (!signature_ready) {
+        // RITMO 2: Ambos conectados pero sin autenticación exitosa aún -> PARPADEO MUY RÁPIDO (100ms)
+        if (current_time - last_led_blink_time >= 100) {
+            last_led_blink_time = current_time;
+            led_state = !led_state;
+            board_led_write(led_state);
+        }
+    } else {
+        // RITMO 3: Todo correcto y autenticado -> LED ENCENDIDO FIJO
+        board_led_write(true);
+    }
+}
+
 int main() {
     board_init(); report_init(); tusb_init(); stdio_init_all();
     while (1) {
         tuh_task(); tud_task(); hid_task(); auth_task(); wheel_init_task();
+        led_status_task(); 
     }
     return 0;
 }
@@ -132,7 +161,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
         case 0xF3: memcpy(buffer, output_0xf3, reqlen); signature_ready = false; return reqlen;
         case 0xF1: buffer[0] = nonce_id; buffer[1] = signature_part; buffer[2] = 0;
             memcpy(&buffer[3], &signature[signature_part * 56], 56); signature_part++;
-            if (signature_part == 19) signature_part = 0; return reqlen;
+            if (signature_part == 19) { signature_part = 0; signature_ready = true; } return reqlen;
         case 0xF2: buffer[0] = nonce_id; buffer[1] = signature_ready ? 0 : 16; memset(&buffer[2], 0, 9); return reqlen;
     }
     return reqlen;
@@ -153,10 +182,12 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
     uint16_t vid, pid; tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    // Permite que se monte tanto en su estado inicial (c294) como en nativo (c299)
     if (vid == 0x046d && (pid == 0xc294 || pid == 0xc299)) { 
-        wheel_device = dev_addr; wheel_instance = instance; tuh_hid_receive_report(dev_addr, instance);
-        if (pid == 0xc299) initialized = true; // Evita mandar el comando de despertar si ya está despierto
+        wheel_device = dev_addr; wheel_instance = instance; 
+        if (pid == 0xc299) initialized = true; 
+        
+        // Reconexión forzada del endpoint HID para evitar cortes al cambiar de PID
+        tuh_hid_receive_report(dev_addr, instance);
     } else { 
         auth_device = dev_addr; auth_instance = instance; 
     }
@@ -173,12 +204,12 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         tuh_vid_pid_get(dev_addr, &vid, &pid);
         
         if (pid == 0xc294) {
-            // MODO COMPATIBILIDAD (Antes de despertar el G25) - Código original de jfedor2 intacto
+            // MODO ARRANQUE (Driving Force)
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
             report.brake = df->brake << 8;
-            report.clutch = 0xFFFF; // Sin embrague físico en este modo
+            report.clutch = 0xFFFF; 
             report.dpad = df->hat;
             report.cross = df->cross;
             report.square = df->square;
@@ -188,52 +219,52 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L1 = df->L1;
             report.R2 = df->R2;
             report.L2 = df->L2;
+            
             report.select = df->select;
-            report.start = df->start;
-            report.R3 = df->R3;
             report.L3 = df->L3;
+            report.R3 = df->R3;
+            report.start = df->start;
             
         } else if (pid == 0xc299) {
-            // MODO G25 NATIVO (Lectura en bruto a prueba de errores de compilador)
-            uint8_t const* d = report_;
+            // MODO NATIVO OPTIMIZADO (Logitech G25 14-bits real)
+            g25_native_report_t* g25 = (g25_native_report_t*) report_;
             
-            // 1. Volante (14 bits, combinando el byte 0 y el byte 1)
-            uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
+            // Volante preciso combinando bytes altos y bajos
+            uint16_t raw_wheel = g25->wheel_low | (g25->wheel_high << 8);
             report.wheel = raw_wheel << 2;
             
-            // 2. Pedales invertidos para PS5
-            report.throttle = (255 - d[5]) << 8;
-            report.brake    = (255 - d[6]) << 8;
-            if (len >= 8) report.clutch = (255 - d[7]) << 8;
+            // Lectura directa de pedales (invirtiendo para el estándar G29 de PS5)
+            report.throttle = (255 - g25->throttle) << 8;
+            report.brake    = (255 - g25->brake) << 8;
+            report.clutch   = (255 - g25->clutch) << 8; // ¡Embrague analógico reparado!
             
-            // 3. D-Pad
-            uint8_t hat = d[4] & 0x0F;
-            report.dpad = (hat < 8) ? hat : 8;
+            // D-Pad de la palanca
+            report.dpad = (g25->hat < 8) ? g25->hat : 8;
             
-            // 4. Botones principales del aro y levas
-            report.cross    = (d[1] & 0x40) ? 1 : 0;
-            report.square   = (d[1] & 0x80) ? 1 : 0;
-            report.circle   = (d[2] & 0x01) ? 1 : 0;
-            report.triangle = (d[2] & 0x02) ? 1 : 0;
-            report.R1       = (d[2] & 0x04) ? 1 : 0;
-            report.L1       = (d[2] & 0x08) ? 1 : 0;
-            report.R2       = (d[2] & 0x10) ? 1 : 0;
-            report.L2       = (d[2] & 0x20) ? 1 : 0;
+            // Botones del Aro y Levas
+            report.cross    = (g25->wheel_high & 0x40) ? 1 : 0;
+            report.square   = (g25->wheel_high & 0x80) ? 1 : 0;
+            report.circle   = (g25->buttons1 & 0x01) ? 1 : 0;
+            report.triangle = (g25->buttons1 & 0x02) ? 1 : 0;
+            report.R1       = (g25->buttons1 & 0x04) ? 1 : 0;
+            report.L1       = (g25->buttons1 & 0x08) ? 1 : 0;
+            report.R2       = (g25->buttons1 & 0x10) ? 1 : 0;
+            report.L2       = (g25->buttons1 & 0x20) ? 1 : 0;
             
-            // 5. BOTONES ROJOS (Mapeo exacto de Izquierda a Derecha)
-            report.select   = (d[2] & 0x40) ? 1 : 0; // 1º Izquierda
-            report.L3       = (d[2] & 0x80) ? 1 : 0; // 2º Centro-Izq
-            report.R3       = (d[3] & 0x01) ? 1 : 0; // 3º Centro-Der
-            report.start    = (d[3] & 0x02) ? 1 : 0; // 4º Derecha
+            // REORGANIZACIÓN SOLICITADA DE LOS BOTONES ROJOS (De Izquierda a Derecha)
+            report.select   = (g25->buttons1 & 0x40) ? 1 : 0; // 1º Izquierda -> SELECT
+            report.L3       = (g25->buttons1 & 0x80) ? 1 : 0; // 2º Centro-Izquierda -> L3 (Físico)
+            report.R3       = (g25->buttons2 & 0x01) ? 1 : 0; // 3º Centro-Derecha -> R3 (Físico)
+            report.start    = (g25->buttons2 & 0x02) ? 1 : 0; // 4º Derecha -> START
             
-            // 6. Palanca de Cambios en H
-            if (d[3] & 0x04) report.square |= 1;  // 1ª Marcha
-            if (d[3] & 0x08) report.cross  |= 1;  // 2ª Marcha
-            if (d[3] & 0x10) report.circle |= 1;  // 3ª Marcha
-            if (d[3] & 0x20) report.triangle|= 1; // 4ª Marcha
-            if (d[3] & 0x40) report.R1     |= 1;  // 5ª Marcha
-            if (d[3] & 0x80) report.L1     |= 1;  // 6ª Marcha
-            if (d[4] & 0x10) report.R2     |= 1;  // Marcha Atrás
+            // Palanca de cambios en H (Decodificación limpia por mapeo directo estructural)
+            if (g25->buttons2 & 0x04) report.square |= 1;  // 1ª Marcha
+            if (g25->buttons2 & 0x08) report.cross  |= 1;  // 2ª Marcha
+            if (g25->buttons2 & 0x10) report.circle |= 1;  // 3ª Marcha
+            if (g25->buttons2 & 0x20) report.triangle|= 1; // 4ª Marcha
+            if (g25->buttons2 & 0x40) report.R1     |= 1;  // 5ª Marcha
+            if (g25->buttons2 & 0x80) report.L1     |= 1;  // 6ª Marcha
+            if (g25->buttons3 & 0x10) report.R2     |= 1;  // Marcha Atrás (Pulsando hacia abajo)
         }
     }
     tuh_hid_receive_report(dev_addr, instance);
