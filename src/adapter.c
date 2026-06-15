@@ -35,7 +35,6 @@ enum {
 };
 
 uint8_t state = IDLE;
-
 bool initialized = false;
 
 uint8_t get_buffer[64];
@@ -59,20 +58,15 @@ const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
 void report_init() {
     memset(&report, 0, sizeof(report));
-    report.lx = 0x80;
-    report.ly = 0x80;
-    report.rx = 0x80;
-    report.ry = 0x80;
+    report.lx = 0x80; report.ly = 0x80; report.rx = 0x80; report.ry = 0x80;
     report.clutch = 0xFF00;
     memcpy(&prev_report, &report, sizeof(report));
 }
 
 void hid_task() {
-    if (!tud_hid_ready()) {
-        return;
-    }
+    if (!tud_hid_ready()) return;
 
-    // BOTÓN PS PERSONALIZADO: Se activa con L3 + R3
+    // BOTÓN PS PERSONALIZADO: L3 + R3 encienden el mando en la PS5
     if (report.L3 && report.R3) {
         report.PS = 1;
     } else {
@@ -95,7 +89,7 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Forzar modo extendido del G25 nativo
+        // Comando para forzar al G25 a activar su modo nativo completo
         static uint8_t g25_native_mode[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, g25_native_mode, sizeof(g25_native_mode));
     }
@@ -107,39 +101,26 @@ void auth_task() {
             case IDLE: break;
             case SENDING_RESET:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
-                busy = true;
-                break;
+                busy = true; break;
             case SENDING_NONCE:
                 set_buffer[0] = 0xF0; set_buffer[1] = nonce_id; set_buffer[2] = nonce_part; set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
-                busy = true;
-                nonce_part++;
-                break;
+                busy = true; nonce_part++; break;
             case WAITING_FOR_SIG:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
-                busy = true;
-                break;
+                busy = true; break;
             case RECEIVING_SIG:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
-                busy = true;
-                break;
+                busy = true; break;
         }
     }
 }
 
 int main() {
-    board_init();
-    report_init();
-    tusb_init();
-    stdio_init_all();
-
+    board_init(); report_init(); tusb_init(); stdio_init_all();
     while (1) {
-        tuh_task();
-        tud_task();
-        hid_task();
-        auth_task();
-        wheel_init_task();
+        tuh_task(); tud_task(); hid_task(); auth_task(); wheel_init_task();
     }
     return 0;
 }
@@ -203,66 +184,62 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t vid; uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    if ((vid == 0x046d) && (pid == 0xc294)) { 
-        wheel_device = dev_addr; wheel_instance = instance;
+    if (vid == 0x046d && (pid == 0xc294 || pid == 0xc299)) { 
+        // ¡SOLUCIÓN! Ahora acepta tanto el modo compatibilidad (c294) como el modo G25 Nativo (c299)
+        wheel_device = dev_addr;
+        wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
-        initialized = false;
+        if (pid == 0xc299) initialized = true; // Si ya arrancó en modo nativo, no reenviar comando
     } else {
-        auth_device = dev_addr; auth_instance = instance;
+        auth_device = dev_addr;
+        auth_instance = instance;
     }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    if (dev_addr == wheel_device) { wheel_device = 0; wheel_instance = 0; }
+    if (dev_addr == wheel_device) { wheel_device = 0; wheel_instance = 0; initialized = false; }
     if (dev_addr == auth_device) { auth_device = 0; auth_instance = 0; }
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
-        // Leemos los bytes directamente sin riesgo de desplazamiento
-        uint8_t const* d = report_;
+        g25_report_t* g25 = (g25_report_t*) report_;
         
-        // Eje de dirección (Combinando bytes 0 y 1)
-        uint16_t raw_wheel = ((d[1] & 0x3F) << 8) | d[0];
-        report.wheel = raw_wheel << 2;
+        // Mapeo de Ejes e inversión de pedales para PS5
+        report.wheel = g25->wheel << 2; 
+        report.throttle = (255 - g25->throttle) << 8;
+        report.brake = (255 - g25->brake) << 8;
+        report.clutch = (255 - g25->clutch) << 8; 
 
-        // Pedales (Bytes 5, 6 y 7)
-        report.throttle = (255 - d[5]) << 8;
-        report.brake = (255 - d[6]) << 8;
-        report.clutch = (255 - d[7]) << 8; // ¡Embrague directo!
+        // Mapeo del D-Pad
+        report.dpad = (g25->dpad < 8) ? g25->dpad : 8;
 
-        // Cruceta D-Pad (Byte 1)
-        uint8_t hat = d[1] >> 4;
-        report.dpad = (hat < 8) ? hat : 8;
+        // Botones del aro
+        report.cross = (g25->buttons & 0x01) ? 1 : 0;
+        report.square = (g25->buttons & 0x02) ? 1 : 0;
+        report.R1 = (g25->buttons & 0x10) ? 1 : 0;
+        report.L1 = (g25->buttons & 0x20) ? 1 : 0;
 
-        // Mapeo manual de la matriz de botones (Bytes 2, 3 y 4)
-        uint32_t b = (d[4] << 16) | (d[3] << 8) | d[2];
+        // ORDEN PERSONALIZADO DE LOS BOTONES ROJOS (Select, L3, R3, Start)
+        report.select = (g25->buttons & 0x40) ? 1 : 0; // 1º botón rojo
+        report.L3 = (g25->buttons & 0x80) ? 1 : 0;     // 2º botón rojo
+        report.R3 = (g25->buttons & 0x100) ? 1 : 0;    // 3º botón rojo
+        report.start = (g25->buttons & 0x200) ? 1 : 0;  // 4º botón rojo
 
-        report.cross = (b & 0x0001) ? 1 : 0;     // Aro Derecho
-        report.square = (b & 0x0002) ? 1 : 0;    // Aro Izquierdo
-        report.R1 = (b & 0x0010) ? 1 : 0;        // Leva D
-        report.L1 = (b & 0x0020) ? 1 : 0;        // Leva I
+        // Botones auxiliares negros de la palanca
+        report.circle = (g25->buttons & 0x04) ? 1 : 0;
+        report.triangle = (g25->buttons & 0x08) ? 1 : 0;
+        report.L2 = (g25->buttons & 0x400) ? 1 : 0;
+        report.R2 = (g25->buttons & 0x0800) ? 1 : 0;
 
-        // TUS BOTONES ROJOS DE PALANCA ORDENADOS (Select, L3, R3, Start)
-        report.select = (b & 0x0040) ? 1 : 0;    // 1º Botón Rojo
-        report.L3 = (b & 0x0080) ? 1 : 0;        // 2º Botón Rojo
-        report.R3 = (b & 0x0100) ? 1 : 0;        // 3º Botón Rojo
-        report.start = (b & 0x0200) ? 1 : 0;     // 4º Botón Rojo
-
-        // Botones negros de la palanca
-        report.circle = (b & 0x0400) ? 1 : 0;   
-        report.triangle = (b & 0x0800) ? 1 : 0; 
-        report.L2 = (b & 0x0004) ? 1 : 0;       
-        report.R2 = (b & 0x0008) ? 1 : 0;       
-
-        // PALANCA EN H (Bytes de marchas extendidas)
-        if (b & 0x00010000) report.square |= 1; // 1ª
-        if (b & 0x00020000) report.cross |= 1;  // 2ª
-        if (b & 0x00040000) report.circle |= 1; // 3ª
-        if (b & 0x00080000) report.triangle |= 1;// 4ª
-        if (b & 0x00100000) report.R1 |= 1;     // 5ª
-        if (b & 0x00200000) report.L1 |= 1;     // 6ª
-        if (b & 0x00400000) report.R2 |= 1;     // Marcha Atrás
+        // Palanca de cambios en H (Asignados a marchas virtuales)
+        if (g25->buttons & 0x00010000) report.square |= 1; 
+        if (g25->buttons & 0x00020000) report.cross |= 1;  
+        if (g25->buttons & 0x00040000) report.circle |= 1; 
+        if (g25->buttons & 0x00080000) report.triangle |= 1;
+        if (g25->buttons & 0x00100000) report.R1 |= 1;     
+        if (g25->buttons & 0x00200000) report.L1 |= 1;     
+        if (g25->buttons & 0x00400000) report.R2 |= 1;     
     }
 
     tuh_hid_receive_report(dev_addr, instance);
