@@ -33,7 +33,7 @@ typedef struct __attribute__((packed)) {
     uint8_t whatever2[13];
 } g29_report_t;
 
-// Driving Force HID report (Estructura base original de arranque)
+// Driving Force HID report (Estructura base original)
 typedef struct __attribute__((packed)) {
     uint32_t wheel : 10;
     uint32_t cross : 1;
@@ -55,18 +55,5 @@ typedef struct __attribute__((packed)) {
     uint8_t throttle;
     uint8_t brake;
 } df_report_t;
-
-// Estructura limpia para el G25 Nativo sin campos de bits problemáticos
-typedef struct __attribute__((packed)) {
-    uint8_t wheel_low;
-    uint8_t wheel_high;
-    uint8_t buttons1;     
-    uint8_t buttons2;     
-    uint8_t buttons3;     
-    uint8_t hat_and_reverse; 
-    uint8_t throttle;     
-    uint8_t brake;        
-    uint8_t clutch;       
-} g25_native_report_t;
 
 #endif
