@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// G29 HID report
+// G29 HID report (Lo que enviamos a la PS5)
 typedef struct __attribute__((packed)) {
     uint8_t lx;
     uint8_t ly;
@@ -33,27 +33,14 @@ typedef struct __attribute__((packed)) {
     uint8_t whatever2[13];
 } g29_report_t;
 
-// Driving Force HID report
+// ESTRUCTURA REAL DEL G25 (Modo Extendido)
 typedef struct __attribute__((packed)) {
-    uint32_t wheel : 10;
-    uint32_t cross : 1;
-    uint32_t square : 1;
-    uint32_t circle : 1;
-    uint32_t triangle : 1;
-    uint32_t R1 : 1;
-    uint32_t L1 : 1;
-    uint32_t R2 : 1;
-    uint32_t L2 : 1;
-    uint32_t select : 1;
-    uint32_t start : 1;
-    uint32_t R3 : 1;
-    uint32_t L3 : 1;
-    uint32_t whatever : 2;
-    uint8_t y;
-    uint32_t hat : 4;
-    uint32_t whatever2 : 4;
-    uint8_t throttle;
-    uint8_t brake;
-} df_report_t;
+    uint16_t wheel : 14;      // 0 a 16383
+    uint32_t buttons : 18;    // 18 botones en total (incluye marchas)
+    uint8_t throttle;         // Acelerador
+    uint8_t brake;            // Freno
+    uint8_t clutch;           // Embrague
+    uint8_t dpad;             // Cruceta
+} g25_report_t;
 
 #endif
