@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// G29 HID report (Estructura final hacia la PS5)
+// G29 HID report
 typedef struct __attribute__((packed)) {
     uint8_t lx;
     uint8_t ly;
@@ -33,7 +33,7 @@ typedef struct __attribute__((packed)) {
     uint8_t whatever2[13];
 } g29_report_t;
 
-// Driving Force HID report (Estructura base original)
+// Driving Force HID report
 typedef struct __attribute__((packed)) {
     uint32_t wheel : 10;
     uint32_t cross : 1;
