@@ -91,7 +91,7 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Comando mágico: Despierta el G25 para activar embrague y palanca (PID 0xc299)
+        // Comando mágico para despertar el G25 con embrague y palanca (PID 0xc299)
         static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
@@ -155,6 +155,7 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
+                // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
@@ -199,7 +200,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {
+        case 0xF1: {  // GET_SIGNATURE_NONCE
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
@@ -216,7 +217,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             }
             return reqlen;
         }
-        case 0xF2: {
+        case 0xF2: {  // GET_SIGNING_STATE
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
@@ -228,7 +229,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {
+    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
@@ -264,19 +265,18 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
-    // Permitimos que el adaptador reconozca el G25 antes (0xc294) y después (0xc299) de mandar el comando mágico
+    // Soporte explícito para el arranque (0xc294) y el modo nativo (0xc299)
     if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
         wheel_device = dev_addr;
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
         
-        // Si ya está en modo G25 Nativo, no enviamos de nuevo la inicialización
         if (pid == 0xc299) {
-            initialized = true;
+            initialized = true; 
         } else {
             initialized = false;
         }
-    } else {
+    } else {  
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -287,7 +287,6 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
-        initialized = true; 
     }
     if (dev_addr == auth_device) {
         auth_device = 0;
@@ -298,11 +297,12 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0) {
         if (dev_addr == wheel_device) {
-            uint16_t vid, pid;
+            uint16_t vid;
+            uint16_t pid;
             tuh_vid_pid_get(dev_addr, &vid, &pid);
 
             if (pid == 0xc294) {
-                // Modo Básico (Driving Force) - El código original de jfedor2
+                // Modo Básico Intacto
                 df_report_t* df = (df_report_t*) report_;
                 report.wheel = df->wheel << 6;
                 report.throttle = df->throttle << 8;
@@ -322,23 +322,33 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.L3 = df->L3;
             } 
             else if (pid == 0xc299 && len >= 8) {
-                // Modo G25 Nativo Completo (Con Embrague y Palanca en H)
+                // Modo G25 Nativo
                 uint8_t const* d = report_;
 
-                // 1. Volante de 14 bits (combinando byte 0 y 1)
+                // Volante
                 uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
                 report.wheel = raw_wheel << 2;
 
-                // 2. Pedales Analógicos (Se guardan tanto en los bytes principales como en los de alta resolución)
-                report.throttle = (255 - d[5]) << 8;
-                report.brake    = (255 - d[6]) << 8;
-                report.clutch   = (255 - d[7]) << 8;
-                
-                // 3. D-Pad
+                // Extraemos los pedales (0-255 invertidos a estándar PS5)
+                uint8_t gas = 255 - d[5];
+                uint8_t brake = 255 - d[6];
+                uint8_t clutch = 255 - d[7];
+
+                // Mapeo Alta Resolución para GT7 (16 bits)
+                report.throttle = gas << 8;
+                report.brake    = brake << 8;
+                report.clutch   = clutch << 8;
+
+                // SOLUCIÓN CAUSA 2: GT7 busca los pedales también en el bloque oculto "Vendor Defined"
+                report.whatever[0] = gas;
+                report.whatever[1] = brake;
+                report.whatever[2] = clutch;
+
+                // D-pad
                 uint8_t hat = d[4] & 0x0F;
                 report.dpad = (hat < 8) ? hat : 8;
 
-                // 4. Botones Principales (Copiados fielmente del protocolo Logitech G25)
+                // Botones principales del volante
                 report.cross    = (d[1] & 0x40) ? 1 : 0;
                 report.square   = (d[1] & 0x80) ? 1 : 0;
                 report.circle   = (d[2] & 0x01) ? 1 : 0;
@@ -347,23 +357,20 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.L1       = (d[2] & 0x08) ? 1 : 0;
                 report.R2       = (d[2] & 0x10) ? 1 : 0;
                 report.L2       = (d[2] & 0x20) ? 1 : 0;
-                report.select   = (d[3] & 0x01) ? 1 : 0; // Botones rojos nativos
-                report.start    = (d[3] & 0x02) ? 1 : 0;
-                report.R3       = (d[2] & 0x40) ? 1 : 0;
-                report.L3       = (d[2] & 0x80) ? 1 : 0;
+                report.select   = (d[2] & 0x40) ? 1 : 0;
+                report.start    = (d[2] & 0x80) ? 1 : 0;
+                report.R3       = (d[3] & 0x01) ? 1 : 0;
+                report.L3       = (d[3] & 0x02) ? 1 : 0;
 
-                // 5. Mapeo de la Palanca en H
-                // La consola PS5 lee las marchas en la sección "vendor defined" (los arrays "whatever")
-                report.whatever[0] = 0; // Limpiamos el byte para evitar marchas fantasma
-                report.whatever[1] = 0; // Por seguridad, inyectamos también formato entero
-                
-                if (d[3] & 0x04) { report.whatever[0] |= (1 << 0); report.whatever[1] = 1; } // 1ª Marcha
-                if (d[3] & 0x08) { report.whatever[0] |= (1 << 1); report.whatever[1] = 2; } // 2ª Marcha
-                if (d[3] & 0x10) { report.whatever[0] |= (1 << 2); report.whatever[1] = 3; } // 3ª Marcha
-                if (d[3] & 0x20) { report.whatever[0] |= (1 << 3); report.whatever[1] = 4; } // 4ª Marcha
-                if (d[3] & 0x40) { report.whatever[0] |= (1 << 4); report.whatever[1] = 5; } // 5ª Marcha
-                if (d[3] & 0x80) { report.whatever[0] |= (1 << 5); report.whatever[1] = 6; } // 6ª Marcha
-                if (d[4] & 0x10) { report.whatever[0] |= (1 << 6); report.whatever[1] = 7; } // Marcha Atrás
+                // SOLUCIÓN CAUSA 1: La palanca en H se envía exclusivamente en whatever[3]
+                report.whatever[3] = 0;
+                if (d[3] & 0x04) report.whatever[3] |= (1 << 0); // 1ª Marcha
+                if (d[3] & 0x08) report.whatever[3] |= (1 << 1); // 2ª Marcha
+                if (d[3] & 0x10) report.whatever[3] |= (1 << 2); // 3ª Marcha
+                if (d[3] & 0x20) report.whatever[3] |= (1 << 3); // 4ª Marcha
+                if (d[3] & 0x40) report.whatever[3] |= (1 << 4); // 5ª Marcha
+                if (d[3] & 0x80) report.whatever[3] |= (1 << 5); // 6ª Marcha
+                if (d[4] & 0x10) report.whatever[3] |= (1 << 6); // Marcha Atrás
             }
         }
     }
