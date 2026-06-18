@@ -1,12 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "bsp/board_api.h"
 #include "tusb.h"
-
 #include "pico/stdio.h"
-
 #include "reports.h"
 
 uint8_t nonce_id;
@@ -16,14 +13,11 @@ uint8_t signature[1064];
 uint8_t signature_part = 0;
 uint8_t signature_ready = 0;
 uint8_t nonce_ready = 0;
-
 uint8_t expected_part = 0;
-
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
-
 bool busy = false;
 
 enum {
@@ -33,9 +27,7 @@ enum {
     WAITING_FOR_SIG = 3,
     RECEIVING_SIG = 4,
 };
-
 uint8_t state = IDLE;
-
 bool initialized = true;
 
 uint8_t get_buffer[64];
@@ -55,7 +47,6 @@ const uint8_t output_0x03[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
-
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
 void report_init() {
@@ -72,14 +63,11 @@ void hid_task() {
     if (!tud_hid_ready()) {
         return;
     }
-
     report.PS = report.select && report.start;
-
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
         memcpy(&prev_report, &report, sizeof(report));
     }
-
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
         if (wheel_device) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
@@ -134,7 +122,6 @@ int main() {
     report_init();
     tusb_init();
     stdio_init_all();
-
     while (1) {
         tuh_task();
         tud_task();
@@ -142,7 +129,6 @@ int main() {
         auth_task();
         wheel_init_task();
     }
-
     return 0;
 }
 
@@ -155,7 +141,6 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
-                // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
@@ -253,6 +238,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
+            // pass everything through to the wheel
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
@@ -262,21 +248,19 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t vid;
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
-
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
-
+    
     // Soporte explícito para el arranque (0xc294) y el modo nativo (0xc299)
     if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
         wheel_device = dev_addr;
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
-        
         if (pid == 0xc299) {
-            initialized = true; 
+            initialized = true;
         } else {
             initialized = false;
         }
-    } else {  
+    } else {
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -300,9 +284,9 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             uint16_t vid;
             uint16_t pid;
             tuh_vid_pid_get(dev_addr, &vid, &pid);
-
+            
             if (pid == 0xc294) {
-                // Modo Básico Intacto
+                // Modo Básico Intacto (Driving Force)
                 df_report_t* df = (df_report_t*) report_;
                 report.wheel = df->wheel << 6;
                 report.throttle = df->throttle << 8;
@@ -320,34 +304,34 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.start = df->start;
                 report.R3 = df->R3;
                 report.L3 = df->L3;
-            } 
+            }
             else if (pid == 0xc299 && len >= 8) {
                 // Modo G25 Nativo
                 uint8_t const* d = report_;
-
-                // Volante
+                
+                // Volante (Mantenemos la lógica que te dejó el volante recto)
                 uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
                 report.wheel = raw_wheel << 2;
-
+                
                 // Extraemos los pedales (0-255 invertidos a estándar PS5)
                 uint8_t gas = 255 - d[5];
                 uint8_t brake = 255 - d[6];
                 uint8_t clutch = 255 - d[7];
-
+                
                 // Mapeo Alta Resolución para GT7 (16 bits)
                 report.throttle = gas << 8;
                 report.brake    = brake << 8;
                 report.clutch   = clutch << 8;
-
-                // SOLUCIÓN CAUSA 2: GT7 busca los pedales también en el bloque oculto "Vendor Defined"
+                
+                // GT7 busca los pedales también en el bloque oculto "Vendor Defined"
                 report.whatever[0] = gas;
                 report.whatever[1] = brake;
-                report.whatever[2] = clutch;
-
+                report.whatever[2] = clutch; // <-- Embrague correctamente inyectado
+                
                 // D-pad
                 uint8_t hat = d[4] & 0x0F;
                 report.dpad = (hat < 8) ? hat : 8;
-
+                
                 // Botones principales del volante
                 report.cross    = (d[1] & 0x40) ? 1 : 0;
                 report.square   = (d[1] & 0x80) ? 1 : 0;
@@ -359,21 +343,23 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.L2       = (d[2] & 0x20) ? 1 : 0;
                 report.select   = (d[2] & 0x40) ? 1 : 0;
                 report.start    = (d[2] & 0x80) ? 1 : 0;
-                report.R3       = (d[3] & 0x01) ? 1 : 0;
-                report.L3       = (d[3] & 0x02) ? 1 : 0;
+                
+                // Eliminamos el mapeo erróneo de L3/R3 que causaba el conflicto con la palanca
+                report.R3 = 0; 
+                report.L3 = 0;
 
-                // SOLUCIÓN CAUSA 1: La palanca en H se envía exclusivamente en whatever[3]
+                // SOLUCIÓN DEFINITIVA: Mapeo correcto de la palanca en H al bloque oculto whatever[3]
+                // En el G25 nativo, los bits de la palanca en d[3] están en este orden específico:
                 report.whatever[3] = 0;
-                if (d[3] & 0x04) report.whatever[3] |= (1 << 0); // 1ª Marcha
-                if (d[3] & 0x08) report.whatever[3] |= (1 << 1); // 2ª Marcha
-                if (d[3] & 0x10) report.whatever[3] |= (1 << 2); // 3ª Marcha
-                if (d[3] & 0x20) report.whatever[3] |= (1 << 3); // 4ª Marcha
-                if (d[3] & 0x40) report.whatever[3] |= (1 << 4); // 5ª Marcha
-                if (d[3] & 0x80) report.whatever[3] |= (1 << 5); // 6ª Marcha
-                if (d[4] & 0x10) report.whatever[3] |= (1 << 6); // Marcha Atrás
+                if (d[3] & 0x02) report.whatever[3] |= (1 << 0); // 1ª Marcha
+                if (d[3] & 0x01) report.whatever[3] |= (1 << 1); // 2ª Marcha
+                if (d[3] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
+                if (d[3] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
+                if (d[3] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
+                if (d[3] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
+                if (d[3] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
             }
         }
     }
-
     tuh_hid_receive_report(dev_addr, instance);
 }
