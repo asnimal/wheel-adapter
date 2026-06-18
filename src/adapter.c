@@ -79,7 +79,7 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Comando mágico para despertar el G25 con embrague y palanca (PID 0xc299)
+        // Comando mágico para despertar el G25 en modo nativo (PID 0xc299)
         static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
@@ -238,7 +238,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            // pass everything through to the wheel
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
@@ -250,7 +249,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     tuh_vid_pid_get(dev_addr, &vid, &pid);
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
     
-    // Soporte explícito para el arranque (0xc294) y el modo nativo (0xc299)
+    // Soporte para modo compatibilidad (0xc294) y modo nativo (0xc299)
     if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
         wheel_device = dev_addr;
         wheel_instance = instance;
@@ -306,33 +305,33 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.L3 = df->L3;
             }
             else if (pid == 0xc299 && len >= 8) {
-                // Modo G25 Nativo
+                // MODO G25 NATIVO (CORREGIDO)
                 uint8_t const* d = report_;
                 
-                // Volante (Mantenemos la lógica que te dejó el volante recto)
-                uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
-                report.wheel = raw_wheel << 2;
+                // 1. Volante (10 bits reales en el G25 nativo)
+                uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
+                report.wheel = raw_wheel << 6; // Escalado correcto a 16 bits
                 
-                // Extraemos los pedales (0-255 invertidos a estándar PS5)
+                // 2. Pedales (Invertidos: G25 usa 0=presionado, PS5 usa 0=sin presionar)
                 uint8_t gas = 255 - d[5];
                 uint8_t brake = 255 - d[6];
                 uint8_t clutch = 255 - d[7];
                 
-                // Mapeo Alta Resolución para GT7 (16 bits)
+                // Mapeo a 16 bits para el reporte principal (Alta resolución)
                 report.throttle = gas << 8;
                 report.brake    = brake << 8;
                 report.clutch   = clutch << 8;
                 
-                // GT7 busca los pedales también en el bloque oculto "Vendor Defined"
+                // Mapeo a 8 bits para el bloque oculto (GT7 y otros juegos lo exigen aquí)
                 report.whatever[0] = gas;
                 report.whatever[1] = brake;
-                report.whatever[2] = clutch; // <-- Embrague correctamente inyectado
+                report.whatever[2] = clutch; 
                 
-                // D-pad
-                uint8_t hat = d[4] & 0x0F;
+                // 3. D-Pad (Bits 0-3 del Byte 3)
+                uint8_t hat = d[3] & 0x0F;
                 report.dpad = (hat < 8) ? hat : 8;
                 
-                // Botones principales del volante
+                // 4. Botones principales del volante
                 report.cross    = (d[1] & 0x40) ? 1 : 0;
                 report.square   = (d[1] & 0x80) ? 1 : 0;
                 report.circle   = (d[2] & 0x01) ? 1 : 0;
@@ -344,20 +343,28 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.select   = (d[2] & 0x40) ? 1 : 0;
                 report.start    = (d[2] & 0x80) ? 1 : 0;
                 
-                // Eliminamos el mapeo erróneo de L3/R3 que causaba el conflicto con la palanca
-                report.R3 = 0; 
-                report.L3 = 0;
-
-                // SOLUCIÓN DEFINITIVA: Mapeo correcto de la palanca en H al bloque oculto whatever[3]
-                // En el G25 nativo, los bits de la palanca en d[3] están en este orden específico:
+                // 5. Botones R3/L3 (Bits 4 y 5 del Byte 3)
+                report.R3 = (d[3] & 0x10) ? 1 : 0;
+                report.L3 = (d[3] & 0x20) ? 1 : 0;
+                
+                // 6. Palancas Secuenciales (Bits 6 y 7 del Byte 3)
+                // Las mapeamos a R2/L2 para que funcionen como levas en los juegos
+                if (d[3] & 0x40) report.R2 = 1; // Palanca derecha (Empujar)
+                if (d[3] & 0x80) report.L2 = 1; // Palanca izquierda (Traer)
+                
+                // 7. PALANCA DE CAMBIOS EN H (BYTE 4)
+                // ¡AQUÍ ESTABA EL ERROR DE LA IA! Leía el Byte 3. Los datos reales están en el Byte 4.
                 report.whatever[3] = 0;
-                if (d[3] & 0x02) report.whatever[3] |= (1 << 0); // 1ª Marcha
-                if (d[3] & 0x01) report.whatever[3] |= (1 << 1); // 2ª Marcha
-                if (d[3] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
-                if (d[3] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
-                if (d[3] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
-                if (d[3] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
-                if (d[3] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
+                if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
+                if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
+                if (d[4] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
+                if (d[4] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
+                if (d[4] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
+                if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
+                if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
+                
+                // Botón físico de la palanca de cambios (Bit 7 del Byte 4)
+                report.touchpad = (d[4] & 0x80) ? 1 : 0;
             }
         }
     }
