@@ -28,7 +28,6 @@ enum {
     RECEIVING_SIG = 4,
 };
 uint8_t state = IDLE;
-bool initialized = true;
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -47,6 +46,15 @@ const uint8_t output_0x03[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
+
+// --- VARIABLES PARA FORZAR EL MODO NATIVO (0xC299) ---
+bool force_native_mode = false;
+uint32_t last_native_cmd_time = 0;
+
+static tusb_control_request_t native_req;
+static uint8_t native_cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
+static tuh_xfer_t native_xfer;
+static bool xfer_prepared = false;
 
 void report_init() {
     memset(&report, 0, sizeof(report));
@@ -75,11 +83,27 @@ void hid_task() {
 }
 
 void wheel_init_task() {
-    if (wheel_device && !initialized) {
-        initialized = true;
-        // Comando para desactivar el autocenter
-        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+    // Si el volante está en modo duro (0xC294), le bombardeamos con el comando 0xF8 cada 500ms
+    if (force_native_mode && wheel_device) {
+        if (!xfer_prepared) {
+            uint8_t req_data[8] = { 0x21, 0x09, 0xF8, 0x03, 0x00, 0x00, 0x07, 0x00 };
+            memcpy(&native_req, req_data, 8);
+            
+            native_xfer.daddr      = wheel_device;
+            native_xfer.ep_addr    = 0; 
+            native_xfer.setup      = &native_req;
+            native_xfer.buffer     = native_cmd;
+            native_xfer.complete_cb = NULL;
+            native_xfer.user_data  = 0;
+            xfer_prepared = true;
+        }
+        
+        uint32_t now = board_millis();
+        if (now - last_native_cmd_time > 500) {
+            last_native_cmd_time = now;
+            printf(">> Forzando cambio a Modo Nativo (0xC299)...\n");
+            tuh_control_xfer(&native_xfer);
+        }
     }
 }
 
@@ -219,12 +243,22 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
     uint16_t vid, pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
+    printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
     
-    if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
+    if (vid == 0x046d) {
         wheel_device = dev_addr;
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
-        initialized = (pid == 0xc299);
+        
+        if (pid == 0xc294) {
+            printf(">> G25 en MODO DURO (0xC294). Iniciando bombardeo para cambiar a Nativo...\n");
+            force_native_mode = true;
+            xfer_prepared = false; // Preparar el comando
+        } 
+        else if (pid == 0xc299) {
+            printf(">> ¡¡¡G25 EN MODO NATIVO (0xC299)!!! Embrague y H-Shift desbloqueados.\n");
+            force_native_mode = false; // ¡Lo conseguimos! Dejamos de bombardear.
+        }
     } else {
         auth_device = dev_addr;
         auth_instance = instance;
@@ -232,9 +266,11 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
+    printf("tuh_hid_umount_cb\n");
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
+        force_native_mode = false;
     }
     if (dev_addr == auth_device) {
         auth_device = 0;
@@ -247,87 +283,64 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         uint16_t vid, pid;
         tuh_vid_pid_get(dev_addr, &vid, &pid);
         
-        if (pid == 0xc294) {
-            // MODO COMPATIBILIDAD (0xC294) - RESTAURADO AL ORIGINAL PARA QUE EL VOLANTE SE CENTRE
-            df_report_t* df = (df_report_t*) report_;
-            report.wheel = df->wheel << 6;
-            report.throttle = df->throttle << 8;
-            report.brake = df->brake << 8;
-            report.dpad = df->hat;
-            report.cross = df->cross;
-            report.square = df->square;
-            report.circle = df->circle;
-            report.triangle = df->triangle;
-            report.L2 = df->L2;
-            report.L1 = df->L1;
-            report.R2 = df->R2;
-            report.R1 = df->R1;
-            report.select = df->select;
-            report.start = df->start;
-            report.R3 = df->R3;
-            report.L3 = df->L3;
-            
-            // ¡NUEVO! EL CLUTCH EN MODO COMPATIBILIDAD VIAJA EN EL BYTE 8 (ÍNDICE 7)
-            if (len >= 8) {
-                uint8_t clutch_raw = report_[7];
-                uint8_t clutch = 255 - clutch_raw; // Invertir para que 0 sea sin pisar
-                report.clutch = clutch << 8;       // Alta resolución para GT7
-                report.whatever[2] = clutch;       // Bloque oculto para GT7
-            }
-        }
-        else if (pid == 0xc299 && len >= 8) {
-            // MODO NATIVO (0xC299) - AQUÍ SÍ EXISTE LA PALANCA EN H
+        // SOLO PROCESAMOS EL MODO NATIVO (0xC299)
+        // Leemos los bytes en crudo para evitar errores de alineación de structs en C
+        if (pid == 0xc299 && len >= 8) {
             uint8_t const* d = report_;
             
-            // Volante
-            uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
-            report.wheel = raw_wheel << 6;
+            // 1. VOLANTE (14 BITS REALES - CONFIRMADO POR TI)
+            // d[0] tiene los 8 bits bajos. d[1] tiene los 6 bits altos en su parte baja.
+            uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
+            report.wheel = raw_wheel << 2; // Escalamos a 16 bits para la PS5
             
-            // Pedales
+            // 2. PEDALES (Bytes 5, 6, 7). El G25 usa 0=pisado, PS5 usa 255=pisado.
             uint8_t gas = 255 - d[5];
             uint8_t brake = 255 - d[6];
-            uint8_t clutch = 255 - d[7];
+            uint8_t clutch = 255 - d[7]; // ¡EL EMBRAGUE!
             
+            // Mapeo a 16 bits (Alta resolución para GT7)
             report.throttle = gas << 8;
-            report.brake = brake << 8;
-            report.clutch = clutch << 8;
+            report.brake    = brake << 8;
+            report.clutch   = clutch << 8; 
             
+            // Bloque oculto "Vendor Defined" (GT7 lee los pedales desde aquí también)
             report.whatever[0] = gas;
             report.whatever[1] = brake;
-            report.whatever[2] = clutch;
+            report.whatever[2] = clutch; 
             
-            // Botones y D-Pad
-            report.cross = (d[1] & 0x04) ? 1 : 0;
-            report.square = (d[1] & 0x08) ? 1 : 0;
-            report.circle = (d[1] & 0x10) ? 1 : 0;
-            report.triangle = (d[1] & 0x20) ? 1 : 0;
-            report.R1 = (d[1] & 0x40) ? 1 : 0;
-            report.L1 = (d[1] & 0x80) ? 1 : 0;
+            // 3. BOTONES PRINCIPALES (Bytes 1 y 2)
+            report.cross    = (d[1] & 0x40) ? 1 : 0;
+            report.square   = (d[1] & 0x80) ? 1 : 0;
+            report.circle   = (d[2] & 0x01) ? 1 : 0;
+            report.triangle = (d[2] & 0x02) ? 1 : 0;
+            report.R1       = (d[2] & 0x04) ? 1 : 0;
+            report.L1       = (d[2] & 0x08) ? 1 : 0;
+            report.R2       = (d[2] & 0x10) ? 1 : 0;
+            report.L2       = (d[2] & 0x20) ? 1 : 0;
+            report.select   = (d[2] & 0x40) ? 1 : 0;
+            report.start    = (d[2] & 0x80) ? 1 : 0;
             
-            report.R2 = (d[2] & 0x01) ? 1 : 0;
-            report.L2 = (d[2] & 0x02) ? 1 : 0;
-            report.select = (d[2] & 0x04) ? 1 : 0;
-            report.start = (d[2] & 0x08) ? 1 : 0;
-            report.R3 = (d[2] & 0x10) ? 1 : 0;
-            report.L3 = (d[2] & 0x20) ? 1 : 0;
-            
+            // 4. D-PAD Y LEVAS SECUENCIALES (Byte 3)
+            // El D-Pad (Hat) suele estar en los 4 bits bajos
             uint8_t hat = d[3] & 0x0F;
             report.dpad = (hat < 8) ? hat : 8;
             
-            // Levas secuenciales (mapeadas a R2/L2)
-            if (d[3] & 0x40) report.R2 = 1; 
-            if (d[3] & 0x80) report.L2 = 1; 
+            // Las levas secuenciales (que tú detectaste como L3/R3) las mapeamos a L3/R3
+            report.L3 = (d[3] & 0x10) ? 1 : 0; 
+            report.R3 = (d[3] & 0x20) ? 1 : 0;
             
-            // Palanca en H (Byte 4)
+            // 5. PALANCA DE CAMBIOS EN H (BYTE 4)
+            // La inyectamos en whatever[3] que es donde los juegos de PS5 la buscan
             report.whatever[3] = 0;
-            if (d[4] & 0x01) report.whatever[3] |= (1 << 0);
-            if (d[4] & 0x02) report.whatever[3] |= (1 << 1);
-            if (d[4] & 0x04) report.whatever[3] |= (1 << 2);
-            if (d[4] & 0x08) report.whatever[3] |= (1 << 3);
-            if (d[4] & 0x10) report.whatever[3] |= (1 << 4);
-            if (d[4] & 0x20) report.whatever[3] |= (1 << 5);
-            if (d[4] & 0x40) report.whatever[3] |= (1 << 6);
+            if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
+            if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
+            if (d[4] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
+            if (d[4] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
+            if (d[4] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
+            if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
+            if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
             
+            // Botón físico de la palanca (si lo tiene)
             report.touchpad = (d[4] & 0x80) ? 1 : 0;
         }
     }
