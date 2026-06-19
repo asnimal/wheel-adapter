@@ -21,11 +21,11 @@ uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
+uint16_t wheel_pid = 0; // Añadido para rastrear el modo del G25
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
-
 enum {
     IDLE = 0,
     SENDING_RESET = 1,
@@ -33,7 +33,6 @@ enum {
     WAITING_FOR_SIG = 3,
     RECEIVING_SIG = 4,
 };
-
 uint8_t state = IDLE;
 
 bool initialized = true;
@@ -91,8 +90,18 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // disable autocenter
-        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        
+        if (wheel_pid == 0xc294) {
+            // El G25 está en modo compatibilidad Driving Force. Le enviamos el comando mágico para pasarlo a Nativo.
+            static uint8_t native_cmd[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            tuh_hid_send_report(wheel_device, wheel_instance, 0, native_cmd, sizeof(native_cmd));
+            printf("Enviando comando para activar Modo Nativo G25...\n");
+        } else if (wheel_pid == 0xc299) {
+            // El G25 ya está en modo Nativo. Desactivamos el auto-centrado como hacía el código original.
+            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+            printf("G25 ya en Modo Nativo, inicializando...\n");
+        }
     }
 }
 
@@ -154,7 +163,6 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
-                // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
@@ -199,7 +207,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {  // GET_SIGNATURE_NONCE
+        case 0xF1: {  
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
@@ -216,7 +224,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             }
             return reqlen;
         }
-        case 0xF2: {  // GET_SIGNING_STATE
+        case 0xF2: {  
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
@@ -228,7 +236,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
+    if (report_id == 0xF0) {  
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
@@ -252,36 +260,26 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            // pass everything through to the wheel
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-    printf("tuh_hid_mount_cb\n");
-    
-    uint16_t vid, pid;
+    uint16_t vid;
+    uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    // Identificar si es un volante Logitech (Vendor ID 0x046D)
-    if (vid == 0x046D) {
+    printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
+    
+    // Si es Logitech y el PID es Driving Force (0xC294) o G25 Nativo (0xC299)
+    if (vid == 0x046d && (pid == 0xc294 || pid == 0xc299)) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
-        
-        // Si el volante no está en modo nativo G25 (cuyo PID es 0xC299)
-        // Le enviamos el comando mágico para forzar el cambio.
-        // Esto reiniciará el volante (se descentrará y volverá a calibrar correctamente).
-        if (pid != 0xC299) {
-            static uint8_t g25_native_cmd[7] = {0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00};
-            tuh_hid_set_report(dev_addr, instance, 0, HID_REPORT_TYPE_FEATURE, g25_native_cmd, sizeof(g25_native_cmd));
-            printf("Enviando comando de Modo Nativo al G25...\n");
-        }
-        
+        wheel_pid = pid; // Guardamos el PID para saber en qué estado está
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
     } else {  
-        // Asumimos que cualquier otra cosa es el mando para la autenticación
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -292,6 +290,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
+        wheel_pid = 0;
     }
     if (dev_addr == auth_device) {
         auth_device = 0;
@@ -302,66 +301,51 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0) {
         if (dev_addr == wheel_device) {
-            uint16_t vid, pid;
-            tuh_vid_pid_get(dev_addr, &vid, &pid);
-
-            // COMPROBAMOS SI ESTAMOS EN MODO NATIVO (PID 0xC299)
-            if (pid == 0xC299 && len >= 12) {
+            
+            // PROCESAMIENTO G25 MODO NATIVO
+            if (wheel_pid == 0xc299 && len >= 12) {
                 g25_native_report_t* native = (g25_native_report_t*) report_;
 
-                // --- 1. VOLANTE Y PEDALES ---
-                // Volante (de 14 bits a 16 bits que requiere el G29)
-                uint16_t wheel_14 = native->x_lsb | (native->x_msb << 8);
-                report.wheel = wheel_14 << 2;
+                // 1. Volante y Pedales (Mapeo a formato G29)
+                uint16_t wheel_14 = native->x_lsb | ((native->x_msb & 0x3F) << 8);
+                report.wheel = wheel_14 << 2; 
 
-                // Pedales (G25 nativo envía embrague real)
                 report.throttle = native->throttle << 8;
                 report.brake = native->brake << 8;
-                report.clutch = native->clutch << 8;
+                report.clutch = native->clutch << 8; 
 
-                // --- 2. BOTONERA BÁSICA ---
+                // 2. Botones y DPAD
                 report.dpad = native->buttons1 & 0x0F;
-                report.square = (native->buttons1 >> 4) & 1;
-                report.cross = (native->buttons1 >> 5) & 1;
-                report.circle = (native->buttons1 >> 6) & 1;
-                report.triangle = (native->buttons1 >> 7) & 1;
+                report.square = (native->buttons1 & 0x10) ? 1 : 0;
+                report.cross = (native->buttons1 & 0x20) ? 1 : 0;
+                report.circle = (native->buttons1 & 0x40) ? 1 : 0;
+                report.triangle = (native->buttons1 & 0x80) ? 1 : 0;
 
-                report.R1 = (native->buttons2 >> 0) & 1; // Leva derecha
-                report.L1 = (native->buttons2 >> 1) & 1; // Leva izquierda
-                report.R2 = (native->buttons2 >> 2) & 1; // Botón derecho del volante
-                report.L2 = (native->buttons2 >> 3) & 1; // Botón izquierdo del volante
+                report.R1 = (native->buttons2 & 0x01) ? 1 : 0;
+                report.L1 = (native->buttons2 & 0x02) ? 1 : 0;
+                report.R2 = (native->buttons2 & 0x04) ? 1 : 0;
+                report.L2 = (native->buttons2 & 0x08) ? 1 : 0;
                 
-                // Botones negros de la palanca de cambios (los 4 en fila)
-                report.select = (native->buttons2 >> 4) & 1; 
-                report.start = (native->buttons2 >> 5) & 1;  
-                report.R3 = (native->buttons2 >> 6) & 1;     
-                report.L3 = (native->buttons2 >> 7) & 1;     
+                // Botones de la caja de cambios (Incluye Select y Start necesarios para el botón PS)
+                report.select = (native->buttons2 & 0x10) ? 1 : 0;
+                report.start = (native->buttons2 & 0x20) ? 1 : 0;
+                report.R3 = (native->buttons2 & 0x40) ? 1 : 0;
+                report.L3 = (native->buttons2 & 0x80) ? 1 : 0;
 
-                // --- 3. BOTÓN PS (MUY IMPORTANTE) ---
-                // Para que la PS5 detecte el volante, pulsa a la vez SELECT y START 
-                // (los dos primeros botones negros de la palanca de cambios).
-                report.PS = (report.select && report.start) ? 1 : 0;
-                if (report.PS) { 
-                    report.select = 0; // Limpiamos para no enviar otros comandos a la vez
-                    report.start = 0;
-                }
-
-                // --- 4. MARCHAS EN H ---
-                // El G29 mapea la palanca en el tercer byte del array "whatever"
+                // 3. Marchas en H (Mapeadas a los datos internos del G29)
                 uint8_t g29_gears = 0;
-                if (native->buttons3 & 0x02) g29_gears |= 0x01; // 1ª Marcha
-                if (native->buttons3 & 0x04) g29_gears |= 0x02; // 2ª Marcha
-                if (native->buttons3 & 0x08) g29_gears |= 0x04; // 3ª Marcha
-                if (native->buttons3 & 0x10) g29_gears |= 0x08; // 4ª Marcha
-                if (native->buttons3 & 0x20) g29_gears |= 0x10; // 5ª Marcha
-                if (native->buttons3 & 0x40) g29_gears |= 0x20; // 6ª Marcha
-                if (native->buttons3 & 0x01) g29_gears |= 0x40; // Marcha Atrás
-                
+                if (native->buttons3 & 0x02) g29_gears |= 0x01; // 1ª
+                if (native->buttons3 & 0x04) g29_gears |= 0x02; // 2ª
+                if (native->buttons3 & 0x08) g29_gears |= 0x04; // 3ª
+                if (native->buttons3 & 0x10) g29_gears |= 0x08; // 4ª
+                if (native->buttons3 & 0x20) g29_gears |= 0x10; // 5ª
+                if (native->buttons3 & 0x40) g29_gears |= 0x20; // 6ª
+                if (native->buttons3 & 0x01) g29_gears |= 0x40; // Reversa
                 report.whatever[2] = g29_gears;
-
-            } else {
-                // FALLBACK: Si por lo que sea el volante aún está reiniciándose, 
-                // usa el código original del Driving Force.
+                
+            } 
+            // PROCESAMIENTO DRIVING FORCE (Fallback del código original)
+            else if (wheel_pid == 0xc294) {
                 df_report_t* df = (df_report_t*) report_;
                 report.wheel = df->wheel << 6;
                 report.throttle = df->throttle << 8;
@@ -371,9 +355,17 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.square = df->square;
                 report.circle = df->circle;
                 report.triangle = df->triangle;
-                // ... deja aquí el resto de tu código original para el DF si lo prefieres ...
+                report.L2 = df->L2;
+                report.L1 = df->L1;
+                report.R2 = df->R2;
+                report.R1 = df->R1;
+                report.select = df->select;
+                report.start = df->start;
+                report.R3 = df->R3;
+                report.L3 = df->L3;
             }
-        } else if (dev_addr == auth_device) {
-            // (Tu código de autenticación de PS4 actual se queda intacto aquí)
+        }
+    }
+
     tuh_hid_receive_report(dev_addr, instance);
 }
