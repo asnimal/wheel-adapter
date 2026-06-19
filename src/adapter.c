@@ -74,17 +74,22 @@ void hid_task() {
     }
 }
 
+// Callback vacío para la transferencia de control (no necesitamos hacer nada al terminar)
+void control_xfer_cb(tuh_xfer_t* xfer) {
+    // El comando se envió. El G25 debería reiniciar su conexión USB y volver como 0xC299.
+    printf(">> Comando de Modo Nativo enviado. Resultado: %d\n", xfer->result == XFER_RESULT_SUCCESS);
+}
+
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true; 
         
-        printf(">> G25 en Modo Compatibilidad. Enviando comando forzado...\n");
+        printf(">> G25 en Modo Compatibilidad. Enviando comando forzado por Control Transfer...\n");
         
         // El comando mágico para cambiar a Modo Nativo (0xC299)
         static uint8_t cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
         
-        // CONSTRUCCIÓN DEL SETUP PACKET USANDO MEMCPY (100% SEGURO PARA GCC)
-        // Esto evita los errores de "strict aliasing" y "alignment" que causaban el Exit Code 2.
+        // Construimos el Setup Packet usando memcpy (seguro para GCC)
         tusb_control_request_t request;
         uint8_t req_data[8] = { 
             0x21,       // bmRequestType (Host-to-Device, Class, Interface)
@@ -95,8 +100,17 @@ void wheel_init_task() {
         };
         memcpy(&request, req_data, 8);
         
-        // Enviamos directamente por el Endpoint 0
-        tuh_control_xfer(wheel_device, &request, cmd, NULL);
+        // Construimos la estructura tuh_xfer_t que TinyUSB exige
+        static tuh_xfer_t xfer;
+        xfer.daddr      = wheel_device;
+        xfer.ep_addr    = 0; // Endpoint 0 (Control)
+        xfer.setup      = &request;
+        xfer.buffer     = cmd;
+        xfer.complete_cb = control_xfer_cb;
+        xfer.user_data  = 0;
+        
+        // Enviamos la transferencia de control
+        tuh_control_xfer(&xfer);
     }
 }
 
