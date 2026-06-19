@@ -75,30 +75,24 @@ void hid_task() {
 }
 
 void wheel_init_task() {
-    // Solo enviamos el comando si está en modo compatibilidad (initialized == false)
     if (wheel_device && !initialized) {
-        initialized = true; // Marcamos como inicializado para no repetir
+        initialized = true; 
         
         printf(">> G25 en Modo Compatibilidad. Enviando comando forzado por Control Transfer...\n");
         
         // El comando mágico para cambiar a Modo Nativo (0xC299)
-        // DEBE ser static o global porque tuh_control_xfer es asíncrono
         static uint8_t cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
         
-        // Construimos la petición USB cruda (SET_REPORT)
-        // bmRequestType: 0x21 (Host-to-Device, Class, Interface)
-        // bRequest: 0x09 (SET_REPORT)
-        // wValue: 0x02F8 (Output Report, ID 0xF8)
-        tusb_control_request_t const request = {
-            .bmRequestType = 0x21,
-            .bRequest = 0x09, 
-            .wValue = 0x02F8, 
-            .wIndex = 0,
-            .wLength = 7
-        };
+        // CONSTRUCCIÓN DEL SETUP PACKET EN BYTES CRUDOS (A PRUEBA DE ERRORES DE COMPILACIÓN)
+        // Byte 0: bmRequestType (0x21 = Host-to-Device, Class, Interface)
+        // Byte 1: bRequest (0x09 = SET_REPORT)
+        // Byte 2-3: wValue (0x02F8 -> Little Endian: 0xF8, 0x02)
+        // Byte 4-5: wIndex (0x0000 -> Little Endian: 0x00, 0x00)
+        // Byte 6-7: wLength (0x0007 -> Little Endian: 0x07, 0x00)
+        uint8_t setup_packet[8] = { 0x21, 0x09, 0xF8, 0x02, 0x00, 0x00, 0x07, 0x00 };
         
         // Enviamos directamente por el Endpoint 0, saltándonos el filtro de TinyUSB
-        tuh_control_xfer(wheel_device, &request, cmd, NULL);
+        tuh_control_xfer(wheel_device, (tusb_control_request_t const*) setup_packet, cmd, NULL);
     }
 }
 
@@ -246,14 +240,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
             wheel_device = dev_addr;
             wheel_instance = instance;
             tuh_hid_receive_report(dev_addr, instance);
-            initialized = false; // Esto disparará wheel_init_task
+            initialized = false; 
         } 
         else if (pid == 0xc299) {
             printf(">> ¡ÉXITO! G25 detectado en MODO NATIVO (0xC299).\n");
             wheel_device = dev_addr;
             wheel_instance = instance;
             tuh_hid_receive_report(dev_addr, instance);
-            initialized = true; // Ya está en modo nativo, no enviar más comandos
+            initialized = true; 
         }
         else {
             auth_device = dev_addr;
@@ -283,7 +277,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         tuh_vid_pid_get(dev_addr, &vid, &pid);
         
         if (pid == 0xc294) {
-            // Fallback por si el cambio de modo falla (Modo Compatibilidad)
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
@@ -303,33 +296,30 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L3 = df->L3;
         }
         else if (pid == 0xc299 && len >= 8) {
-            // ¡MODO NATIVO G25! (Aquí es donde el embrague y la palanca en H cobran vida)
             uint8_t const* d = report_;
             
             // 1. Volante (10 bits reales)
             uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
             report.wheel = raw_wheel << 6;
             
-            // 2. Pedales (Invertidos: G25 usa 0=presionado, PS5 usa 0=sin presionar)
+            // 2. Pedales (Invertidos)
             uint8_t gas = 255 - d[5];
             uint8_t brake = 255 - d[6];
             uint8_t clutch = 255 - d[7];
             
-            // Mapeo a 16 bits (Alta resolución)
             report.throttle = gas << 8;
             report.brake    = brake << 8;
             report.clutch   = clutch << 8;
             
-            // Mapeo a 8 bits para el bloque oculto (GT7 lo exige aquí)
             report.whatever[0] = gas;
             report.whatever[1] = brake;
             report.whatever[2] = clutch; 
             
-            // 3. D-Pad (Bits 0-3 del Byte 3)
+            // 3. D-Pad
             uint8_t hat = d[3] & 0x0F;
             report.dpad = (hat < 8) ? hat : 8;
             
-            // 4. Botones principales (Mapeo exacto según hid-lg.c de Linux)
+            // 4. Botones principales
             report.cross    = (d[1] & 0x04) ? 1 : 0;
             report.square   = (d[1] & 0x08) ? 1 : 0;
             report.circle   = (d[1] & 0x10) ? 1 : 0;
@@ -344,9 +334,9 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (d[2] & 0x10) ? 1 : 0;
             report.L3       = (d[2] & 0x20) ? 1 : 0;
             
-            // 5. Palancas Secuenciales (Mapeadas a R2/L2 para que los juegos las usen como levas)
-            if (d[3] & 0x40) report.R2 = 1; // Leva derecha
-            if (d[3] & 0x80) report.L2 = 1; // Leva izquierda
+            // 5. Palancas Secuenciales (Mapeadas a R2/L2)
+            if (d[3] & 0x40) report.R2 = 1; 
+            if (d[3] & 0x80) report.L2 = 1; 
             
             // 6. PALANCA DE CAMBIOS EN H (BYTE 4)
             report.whatever[3] = 0;
@@ -358,7 +348,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
             if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
             
-            // Botón físico de la palanca
             report.touchpad = (d[4] & 0x80) ? 1 : 0;
         }
     }
