@@ -79,9 +79,17 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Comando mágico para despertar el G25 en modo nativo (PID 0xc299)
-        static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        
+        // ¡LA CLAVE DEL ÉXITO!
+        // El comando para cambiar a Modo Nativo (0xC299) DEBE enviarse por SET_REPORT (Control Endpoint).
+        // Las IAs anteriores usaban tuh_hid_send_report (Interrupción) y el G25 lo ignoraba.
+        uint8_t native_cmd[] = { 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        tuh_hid_set_report(wheel_device, wheel_instance, 0xF8, HID_REPORT_TYPE_OUTPUT, native_cmd, sizeof(native_cmd));
+        printf(">> Enviando comando de Modo Nativo (0xF8) al G25...\n");
+
+        // Desactivar autocenter
+        uint8_t disable_autocenter[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        tuh_hid_set_report(wheel_device, wheel_instance, 0xF5, HID_REPORT_TYPE_OUTPUT, disable_autocenter, sizeof(disable_autocenter));
     }
 }
 
@@ -185,7 +193,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {  // GET_SIGNATURE_NONCE
+        case 0xF1: {
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
@@ -202,7 +210,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             }
             return reqlen;
         }
-        case 0xF2: {  // GET_SIGNING_STATE
+        case 0xF2: {
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
@@ -214,7 +222,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
+    if (report_id == 0xF0) {
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
@@ -249,15 +257,17 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     tuh_vid_pid_get(dev_addr, &vid, &pid);
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
     
-    // Soporte para modo compatibilidad (0xc294) y modo nativo (0xc299)
     if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
         wheel_device = dev_addr;
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
-        if (pid == 0xc299) {
-            initialized = true;
-        } else {
+        
+        if (pid == 0xc294) {
+            printf(">> G25 detectado en MODO COMPATIBILIDAD (0xC294). Intentando cambiar a Nativo...\n");
             initialized = false;
+        } else {
+            printf(">> G25 detectado en MODO NATIVO (0xC299). ¡Perfecto!\n");
+            initialized = true;
         }
     } else {
         auth_device = dev_addr;
@@ -285,7 +295,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             tuh_vid_pid_get(dev_addr, &vid, &pid);
             
             if (pid == 0xc294) {
-                // Modo Básico Intacto (Driving Force)
+                // Modo Básico Intacto (por si el comando de modo nativo falla)
                 df_report_t* df = (df_report_t*) report_;
                 report.wheel = df->wheel << 6;
                 report.throttle = df->throttle << 8;
@@ -305,33 +315,33 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.L3 = df->L3;
             }
             else if (pid == 0xc299 && len >= 8) {
-                // MODO G25 NATIVO (CORREGIDO)
+                // ¡MODO G25 NATIVO ACTIVADO! (Aquí es donde aparecen el embrague y la palanca en H)
                 uint8_t const* d = report_;
                 
-                // 1. Volante (10 bits reales en el G25 nativo)
-                uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
-                report.wheel = raw_wheel << 6; // Escalado correcto a 16 bits
+                // Volante (10 bits reales)
+                uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
+                report.wheel = raw_wheel << 6;
                 
-                // 2. Pedales (Invertidos: G25 usa 0=presionado, PS5 usa 0=sin presionar)
+                // Pedales (Invertidos: G25 usa 0=presionado, PS5 usa 0=sin presionar)
                 uint8_t gas = 255 - d[5];
                 uint8_t brake = 255 - d[6];
                 uint8_t clutch = 255 - d[7];
                 
-                // Mapeo a 16 bits para el reporte principal (Alta resolución)
+                // Mapeo Alta Resolución para GT7 (16 bits)
                 report.throttle = gas << 8;
                 report.brake    = brake << 8;
                 report.clutch   = clutch << 8;
                 
-                // Mapeo a 8 bits para el bloque oculto (GT7 y otros juegos lo exigen aquí)
+                // GT7 busca los pedales también en el bloque oculto "Vendor Defined"
                 report.whatever[0] = gas;
                 report.whatever[1] = brake;
                 report.whatever[2] = clutch; 
                 
-                // 3. D-Pad (Bits 0-3 del Byte 3)
+                // D-pad (Bits 0-3 del Byte 3)
                 uint8_t hat = d[3] & 0x0F;
                 report.dpad = (hat < 8) ? hat : 8;
                 
-                // 4. Botones principales del volante
+                // Botones principales del volante
                 report.cross    = (d[1] & 0x40) ? 1 : 0;
                 report.square   = (d[1] & 0x80) ? 1 : 0;
                 report.circle   = (d[2] & 0x01) ? 1 : 0;
@@ -343,17 +353,15 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 report.select   = (d[2] & 0x40) ? 1 : 0;
                 report.start    = (d[2] & 0x80) ? 1 : 0;
                 
-                // 5. Botones R3/L3 (Bits 4 y 5 del Byte 3)
+                // Botones R3/L3
                 report.R3 = (d[3] & 0x10) ? 1 : 0;
                 report.L3 = (d[3] & 0x20) ? 1 : 0;
                 
-                // 6. Palancas Secuenciales (Bits 6 y 7 del Byte 3)
-                // Las mapeamos a R2/L2 para que funcionen como levas en los juegos
-                if (d[3] & 0x40) report.R2 = 1; // Palanca derecha (Empujar)
-                if (d[3] & 0x80) report.L2 = 1; // Palanca izquierda (Traer)
+                // Palancas Secuenciales (Mapeadas a R2/L2 para que funcionen en juegos)
+                if (d[3] & 0x40) report.R2 = 1; 
+                if (d[3] & 0x80) report.L2 = 1; 
                 
-                // 7. PALANCA DE CAMBIOS EN H (BYTE 4)
-                // ¡AQUÍ ESTABA EL ERROR DE LA IA! Leía el Byte 3. Los datos reales están en el Byte 4.
+                // PALANCA DE CAMBIOS EN H (BYTE 4)
                 report.whatever[3] = 0;
                 if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
                 if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
@@ -363,7 +371,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
                 if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
                 
-                // Botón físico de la palanca de cambios (Bit 7 del Byte 4)
+                // Botón físico de la palanca
                 report.touchpad = (d[4] & 0x80) ? 1 : 0;
             }
         }
