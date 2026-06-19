@@ -48,9 +48,10 @@ const uint8_t output_0x03[] = {
 };
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
-// VARIABLES STATIC PARA LA TRANSFERENCIA DE CONTROL (CRUCIAL PARA QUE NO SE PIERDAN EN MEMORIA)
+// VARIABLES STATIC PARA LA TRANSFERENCIA DE CONTROL
 static tusb_control_request_t native_request;
-static uint8_t native_cmd[6] = {0x0A, 0x00, 0x00, 0x00, 0x00, 0x00}; // 6 bytes SIN el 0xF8 inicial
+// EL PAYLOAD CORRECTO: 7 bytes, empezando con 0xF8
+static uint8_t native_cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00}; 
 static tuh_xfer_t native_xfer;
 static bool request_prepared = false;
 
@@ -80,10 +81,9 @@ void hid_task() {
     }
 }
 
-// Callback para saber si el comando se envió correctamente
 void control_xfer_cb(tuh_xfer_t* xfer) {
     if (xfer->result == XFER_RESULT_SUCCESS) {
-        printf(">> [EXITO] Comando de Modo Nativo enviado al G25.\n");
+        printf(">> [EXITO] Comando Feature Report 0xF8 enviado. Esperando reinicio del G25...\n");
     } else {
         printf(">> [FALLO] El comando no se pudo enviar. Codigo: %d\n", xfer->result);
     }
@@ -92,18 +92,19 @@ void control_xfer_cb(tuh_xfer_t* xfer) {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         if (!request_prepared) {
-            // Construimos el Setup Packet USB crudo (Little Endian)
+            // ¡AQUÍ ESTABA EL ERROR! 
+            // Antes usábamos 0x02 (Output Report). Logitech EXIGE 0x03 (Feature Report).
             uint8_t req_data[8] = { 
                 0x21,       // bmRequestType (Host-to-Device, Class, Interface)
                 0x09,       // bRequest (SET_REPORT)
-                0xF8, 0x02, // wValue (Report Type 2=Output, Report ID 0xF8)
+                0xF8, 0x03, // wValue (0x03F8 -> Report Type 3=FEATURE, Report ID 0xF8)
                 0x00, 0x00, // wIndex (Interface 0)
-                0x06, 0x00  // wLength (6 bytes - ¡OJO! Sin el byte 0xF8 en el payload)
+                0x07, 0x00  // wLength (7 bytes)
             };
             memcpy(&native_request, req_data, 8);
             
             native_xfer.daddr      = wheel_device;
-            native_xfer.ep_addr    = 0; // Endpoint 0 (Control)
+            native_xfer.ep_addr    = 0; 
             native_xfer.setup      = &native_request;
             native_xfer.buffer     = native_cmd;
             native_xfer.complete_cb = control_xfer_cb;
@@ -112,12 +113,10 @@ void wheel_init_task() {
             request_prepared = true;
         }
         
-        printf(">> Intentando forzar cambio a Modo Nativo (0xC299)...\n");
+        printf(">> Intentando forzar cambio a Modo Nativo (Blando)...\n");
         bool ret = tuh_control_xfer(&native_xfer);
         if (ret) {
-            initialized = true; // Marcamos como intentado para no saturar el bus
-        } else {
-            printf(">> TinyUSB ocupado, reintentando en el siguiente ciclo...\n");
+            initialized = true; 
         }
     }
 }
@@ -262,15 +261,15 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     
     if (vid == 0x046d) {
         if (pid == 0xc294) {
-            printf(">> G25 detectado en MODO COMPATIBILIDAD (0xC294). Preparando cambio...\n");
+            printf(">> G25 detectado en MODO DURO (Compat 0xC294). Cambiando a Blando...\n");
             wheel_device = dev_addr;
             wheel_instance = instance;
             tuh_hid_receive_report(dev_addr, instance);
             initialized = false; 
-            request_prepared = false; // Resetear para preparar el comando
+            request_prepared = false; 
         } 
         else if (pid == 0xc299) {
-            printf(">> ¡¡¡EXITO!!! G25 detectado en MODO NATIVO (0xC299). Embrague y H-Shift desbloqueados.\n");
+            printf(">> ¡¡¡EXITO!!! G25 en MODO BLANDO (Nativo 0xC299). Embrague y H-Shift activos.\n");
             wheel_device = dev_addr;
             wheel_instance = instance;
             tuh_hid_receive_report(dev_addr, instance);
@@ -304,7 +303,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         tuh_vid_pid_get(dev_addr, &vid, &pid);
         
         if (pid == 0xc294) {
-            // Fallback (Modo Compatibilidad - Aquí es donde ves L3/R3)
+            // Fallback (Modo Duro)
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
@@ -324,10 +323,10 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L3 = df->L3;
         }
         else if (pid == 0xc299 && len >= 8) {
-            // ¡MODO NATIVO G25! (Aquí es donde el embrague y la palanca en H cobran vida)
+            // ¡MODO BLANDO (NATIVO) G25!
             uint8_t const* d = report_;
             
-            // 1. Volante (10 bits reales)
+            // 1. Volante
             uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
             report.wheel = raw_wheel << 6;
             
@@ -340,7 +339,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.brake    = brake << 8;
             report.clutch   = clutch << 8;
             
-            // Bloque oculto para GT7
             report.whatever[0] = gas;
             report.whatever[1] = brake;
             report.whatever[2] = clutch; 
