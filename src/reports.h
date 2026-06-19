@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// Estructura que espera la PS5 (G29)
+// Estructura que espera la consola PS5 (emulando un G29)
 typedef struct __attribute__((packed)) {
     uint8_t lx; uint8_t ly; uint8_t rx; uint8_t ry;
     uint32_t dpad : 4;
@@ -20,7 +20,7 @@ typedef struct __attribute__((packed)) {
     uint8_t whatever2[13];
 } g29_report_t;
 
-// Estructura original del G25
+// Estructura original que envía el volante G25
 typedef struct __attribute__((packed)) {
     uint8_t x_lsb; uint8_t x_msb;
     uint8_t throttle; uint8_t brake; uint8_t clutch;
