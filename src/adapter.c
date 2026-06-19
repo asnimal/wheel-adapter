@@ -78,21 +78,25 @@ void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true; 
         
-        printf(">> G25 en Modo Compatibilidad. Enviando comando forzado por Control Transfer...\n");
+        printf(">> G25 en Modo Compatibilidad. Enviando comando forzado...\n");
         
         // El comando mágico para cambiar a Modo Nativo (0xC299)
         static uint8_t cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
         
-        // CONSTRUCCIÓN DEL SETUP PACKET EN BYTES CRUDOS (A PRUEBA DE ERRORES DE COMPILACIÓN)
-        // Byte 0: bmRequestType (0x21 = Host-to-Device, Class, Interface)
-        // Byte 1: bRequest (0x09 = SET_REPORT)
-        // Byte 2-3: wValue (0x02F8 -> Little Endian: 0xF8, 0x02)
-        // Byte 4-5: wIndex (0x0000 -> Little Endian: 0x00, 0x00)
-        // Byte 6-7: wLength (0x0007 -> Little Endian: 0x07, 0x00)
-        uint8_t setup_packet[8] = { 0x21, 0x09, 0xF8, 0x02, 0x00, 0x00, 0x07, 0x00 };
+        // CONSTRUCCIÓN DEL SETUP PACKET USANDO MEMCPY (100% SEGURO PARA GCC)
+        // Esto evita los errores de "strict aliasing" y "alignment" que causaban el Exit Code 2.
+        tusb_control_request_t request;
+        uint8_t req_data[8] = { 
+            0x21,       // bmRequestType (Host-to-Device, Class, Interface)
+            0x09,       // bRequest (SET_REPORT)
+            0xF8, 0x02, // wValue (0x02F8 -> Output Report, ID 0xF8)
+            0x00, 0x00, // wIndex (Interface 0)
+            0x07, 0x00  // wLength (7 bytes)
+        };
+        memcpy(&request, req_data, 8);
         
-        // Enviamos directamente por el Endpoint 0, saltándonos el filtro de TinyUSB
-        tuh_control_xfer(wheel_device, (tusb_control_request_t const*) setup_packet, cmd, NULL);
+        // Enviamos directamente por el Endpoint 0
+        tuh_control_xfer(wheel_device, &request, cmd, NULL);
     }
 }
 
@@ -277,6 +281,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         tuh_vid_pid_get(dev_addr, &vid, &pid);
         
         if (pid == 0xc294) {
+            // Fallback (Modo Compatibilidad)
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
@@ -296,6 +301,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L3 = df->L3;
         }
         else if (pid == 0xc299 && len >= 8) {
+            // ¡MODO NATIVO G25!
             uint8_t const* d = report_;
             
             // 1. Volante (10 bits reales)
@@ -311,6 +317,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.brake    = brake << 8;
             report.clutch   = clutch << 8;
             
+            // Bloque oculto para GT7
             report.whatever[0] = gas;
             report.whatever[1] = brake;
             report.whatever[2] = clutch; 
