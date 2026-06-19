@@ -1,12 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include "bsp/board_api.h"
 #include "tusb.h"
-
 #include "pico/stdio.h"
-
 #include "reports.h"
 
 uint8_t nonce_id;
@@ -16,14 +13,11 @@ uint8_t signature[1064];
 uint8_t signature_part = 0;
 uint8_t signature_ready = 0;
 uint8_t nonce_ready = 0;
-
 uint8_t expected_part = 0;
-
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
-
 bool busy = false;
 
 enum {
@@ -33,9 +27,7 @@ enum {
     WAITING_FOR_SIG = 3,
     RECEIVING_SIG = 4,
 };
-
 uint8_t state = IDLE;
-
 bool initialized = true;
 
 uint8_t get_buffer[64];
@@ -46,7 +38,6 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// G29
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -55,7 +46,6 @@ const uint8_t output_0x03[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
-
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
 void report_init() {
@@ -69,17 +59,13 @@ void report_init() {
 }
 
 void hid_task() {
-    if (!tud_hid_ready()) {
-        return;
-    }
-
-    report.PS = report.L3 && report.R3;
-
+    if (!tud_hid_ready()) return;
+    
+    report.PS = report.select && report.start;
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
         memcpy(&prev_report, &report, sizeof(report));
     }
-
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
         if (wheel_device) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
@@ -89,18 +75,37 @@ void hid_task() {
 }
 
 void wheel_init_task() {
+    // Solo enviamos el comando si está en modo compatibilidad (initialized == false)
     if (wheel_device && !initialized) {
-        initialized = true;
-        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // disable autocenter
-        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        initialized = true; // Marcamos como inicializado para no repetir
+        
+        printf(">> G25 en Modo Compatibilidad. Enviando comando forzado por Control Transfer...\n");
+        
+        // El comando mágico para cambiar a Modo Nativo (0xC299)
+        // DEBE ser static o global porque tuh_control_xfer es asíncrono
+        static uint8_t cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00};
+        
+        // Construimos la petición USB cruda (SET_REPORT)
+        // bmRequestType: 0x21 (Host-to-Device, Class, Interface)
+        // bRequest: 0x09 (SET_REPORT)
+        // wValue: 0x02F8 (Output Report, ID 0xF8)
+        tusb_control_request_t const request = {
+            .bmRequestType = 0x21,
+            .bRequest = 0x09, 
+            .wValue = 0x02F8, 
+            .wIndex = 0,
+            .wLength = 7
+        };
+        
+        // Enviamos directamente por el Endpoint 0, saltándonos el filtro de TinyUSB
+        tuh_control_xfer(wheel_device, &request, cmd, NULL);
     }
 }
 
 void auth_task() {
     if (!busy && auth_device) {
         switch (state) {
-            case IDLE:
-                break;
+            case IDLE: break;
             case SENDING_RESET:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
@@ -111,7 +116,6 @@ void auth_task() {
                 set_buffer[2] = nonce_part;
                 set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                printf(".");
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
                 nonce_part++;
@@ -133,7 +137,6 @@ int main() {
     report_init();
     tusb_init();
     stdio_init_all();
-
     while (1) {
         tuh_task();
         tud_task();
@@ -141,7 +144,6 @@ int main() {
         auth_task();
         wheel_init_task();
     }
-
     return 0;
 }
 
@@ -149,29 +151,21 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if (dev_addr == auth_device) {
         busy = false;
         switch (report_id) {
-            case 0xF3:
-                printf("Sending nonce to auth controller");
-                state = SENDING_NONCE;
-                break;
+            case 0xF3: state = SENDING_NONCE; break;
             case 0xF2:
-                // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
-                    printf("\n");
-                    printf("Receiving signature from auth controller");
                 }
                 break;
             case 0xF1:
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
                 signature_part++;
-                printf(".");
                 if (signature_part == 19) {
                     state = IDLE;
                     expected_part = 0;
                     signature_ready = true;
                     signature_part = 0;
-                    printf("\n");
                 }
                 break;
         }
@@ -182,8 +176,6 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if ((dev_addr == auth_device) && (report_id == 0xF0)) {
         busy = false;
         if (nonce_part == 5) {
-            printf("\n");
-            printf("Waiting for auth controller to sign...\n");
             state = WAITING_FOR_SIG;
         }
     }
@@ -199,25 +191,19 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {  // GET_SIGNATURE_NONCE
+        case 0xF1: {
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
-            if (signature_part == 0) {
-                printf("Sending signature to PS5");
-            }
-            printf(".");
             memcpy(&buffer[3], &signature[signature_part * 56], 56);
             signature_part++;
             if (signature_part == 19) {
                 signature_part = 0;
-                printf("\n");
                 board_led_write(true);
             }
             return reqlen;
         }
-        case 0xF2: {  // GET_SIGNING_STATE
-            printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
+        case 0xF2: {
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
             memset(&buffer[2], 0, 9);
@@ -228,49 +214,52 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
+    if (report_id == 0xF0) {
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        if (part == 0) {
-            printf("Getting nonce from PS5");
-        }
-        printf(".");
-        if (part > 4) {
-            return;
-        }
+        if (part > 4) return;
         expected_part = part + 1;
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
             nonce_ready = 1;
-            printf("\n");
-            printf("Sending reset to auth controller...\n");
             state = SENDING_RESET;
             nonce_part = 0;
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            // pass everything through to the wheel
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-    uint16_t vid;
-    uint16_t pid;
+    uint16_t vid, pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
-
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
-
-    if ((vid == 0x046d) && (pid == 0xC299)) {  // Driving Force (or another wheel in compatibility mode)
-        wheel_device = dev_addr;
-        wheel_instance = instance;
-        tuh_hid_receive_report(dev_addr, instance);
-        initialized = false;
-    } else {  // assume everything else is the controller we use for authentication
+    
+    if (vid == 0x046d) {
+        if (pid == 0xc294) {
+            printf(">> G25 detectado en MODO COMPATIBILIDAD (0xC294). Preparando cambio...\n");
+            wheel_device = dev_addr;
+            wheel_instance = instance;
+            tuh_hid_receive_report(dev_addr, instance);
+            initialized = false; // Esto disparará wheel_init_task
+        } 
+        else if (pid == 0xc299) {
+            printf(">> ¡ÉXITO! G25 detectado en MODO NATIVO (0xC299).\n");
+            wheel_device = dev_addr;
+            wheel_instance = instance;
+            tuh_hid_receive_report(dev_addr, instance);
+            initialized = true; // Ya está en modo nativo, no enviar más comandos
+        }
+        else {
+            auth_device = dev_addr;
+            auth_instance = instance;
+        }
+    } else {
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -289,13 +278,16 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
-    if (len > 0) {
-        if (dev_addr == wheel_device) {
+    if (len > 0 && dev_addr == wheel_device) {
+        uint16_t vid, pid;
+        tuh_vid_pid_get(dev_addr, &vid, &pid);
+        
+        if (pid == 0xc294) {
+            // Fallback por si el cambio de modo falla (Modo Compatibilidad)
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
             report.brake = df->brake << 8;
-            report.clutch = df->clutch << 8;
             report.dpad = df->hat;
             report.cross = df->cross;
             report.square = df->square;
@@ -310,7 +302,65 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3 = df->R3;
             report.L3 = df->L3;
         }
+        else if (pid == 0xc299 && len >= 8) {
+            // ¡MODO NATIVO G25! (Aquí es donde el embrague y la palanca en H cobran vida)
+            uint8_t const* d = report_;
+            
+            // 1. Volante (10 bits reales)
+            uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
+            report.wheel = raw_wheel << 6;
+            
+            // 2. Pedales (Invertidos: G25 usa 0=presionado, PS5 usa 0=sin presionar)
+            uint8_t gas = 255 - d[5];
+            uint8_t brake = 255 - d[6];
+            uint8_t clutch = 255 - d[7];
+            
+            // Mapeo a 16 bits (Alta resolución)
+            report.throttle = gas << 8;
+            report.brake    = brake << 8;
+            report.clutch   = clutch << 8;
+            
+            // Mapeo a 8 bits para el bloque oculto (GT7 lo exige aquí)
+            report.whatever[0] = gas;
+            report.whatever[1] = brake;
+            report.whatever[2] = clutch; 
+            
+            // 3. D-Pad (Bits 0-3 del Byte 3)
+            uint8_t hat = d[3] & 0x0F;
+            report.dpad = (hat < 8) ? hat : 8;
+            
+            // 4. Botones principales (Mapeo exacto según hid-lg.c de Linux)
+            report.cross    = (d[1] & 0x04) ? 1 : 0;
+            report.square   = (d[1] & 0x08) ? 1 : 0;
+            report.circle   = (d[1] & 0x10) ? 1 : 0;
+            report.triangle = (d[1] & 0x20) ? 1 : 0;
+            report.R1       = (d[1] & 0x40) ? 1 : 0;
+            report.L1       = (d[1] & 0x80) ? 1 : 0;
+            
+            report.R2       = (d[2] & 0x01) ? 1 : 0;
+            report.L2       = (d[2] & 0x02) ? 1 : 0;
+            report.select   = (d[2] & 0x04) ? 1 : 0;
+            report.start    = (d[2] & 0x08) ? 1 : 0;
+            report.R3       = (d[2] & 0x10) ? 1 : 0;
+            report.L3       = (d[2] & 0x20) ? 1 : 0;
+            
+            // 5. Palancas Secuenciales (Mapeadas a R2/L2 para que los juegos las usen como levas)
+            if (d[3] & 0x40) report.R2 = 1; // Leva derecha
+            if (d[3] & 0x80) report.L2 = 1; // Leva izquierda
+            
+            // 6. PALANCA DE CAMBIOS EN H (BYTE 4)
+            report.whatever[3] = 0;
+            if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
+            if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
+            if (d[4] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
+            if (d[4] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
+            if (d[4] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
+            if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
+            if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
+            
+            // Botón físico de la palanca
+            report.touchpad = (d[4] & 0x80) ? 1 : 0;
+        }
     }
-
     tuh_hid_receive_report(dev_addr, instance);
 }
