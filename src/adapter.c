@@ -77,7 +77,7 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Comando para desactivar el autocenter (ayuda a la sensación de "modo blando")
+        // Comando para desactivar el autocenter
         static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
@@ -219,14 +219,12 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
     uint16_t vid, pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
-    printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
     
-    // Aceptamos cualquier volante Logitech (0x046d)
-    if (vid == 0x046d) {
+    if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
         wheel_device = dev_addr;
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
-        initialized = false;
+        initialized = (pid == 0xc299);
     } else {
         auth_device = dev_addr;
         auth_instance = instance;
@@ -234,7 +232,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    printf("tuh_hid_umount_cb\n");
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
@@ -247,65 +244,90 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
-        // ¡LA CLAVE! Leemos los bytes en crudo, ignorando el struct df_report_t que estaba mal alineado.
-        uint8_t const* d = report_;
+        uint16_t vid, pid;
+        tuh_vid_pid_get(dev_addr, &vid, &pid);
         
-        if (len >= 8) {
-            // 1. Volante (10 bits reales en los bytes 0 y 1)
+        if (pid == 0xc294) {
+            // MODO COMPATIBILIDAD (0xC294) - RESTAURADO AL ORIGINAL PARA QUE EL VOLANTE SE CENTRE
+            df_report_t* df = (df_report_t*) report_;
+            report.wheel = df->wheel << 6;
+            report.throttle = df->throttle << 8;
+            report.brake = df->brake << 8;
+            report.dpad = df->hat;
+            report.cross = df->cross;
+            report.square = df->square;
+            report.circle = df->circle;
+            report.triangle = df->triangle;
+            report.L2 = df->L2;
+            report.L1 = df->L1;
+            report.R2 = df->R2;
+            report.R1 = df->R1;
+            report.select = df->select;
+            report.start = df->start;
+            report.R3 = df->R3;
+            report.L3 = df->L3;
+            
+            // ¡NUEVO! EL CLUTCH EN MODO COMPATIBILIDAD VIAJA EN EL BYTE 8 (ÍNDICE 7)
+            if (len >= 8) {
+                uint8_t clutch_raw = report_[7];
+                uint8_t clutch = 255 - clutch_raw; // Invertir para que 0 sea sin pisar
+                report.clutch = clutch << 8;       // Alta resolución para GT7
+                report.whatever[2] = clutch;       // Bloque oculto para GT7
+            }
+        }
+        else if (pid == 0xc299 && len >= 8) {
+            // MODO NATIVO (0xC299) - AQUÍ SÍ EXISTE LA PALANCA EN H
+            uint8_t const* d = report_;
+            
+            // Volante
             uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
-            report.wheel = raw_wheel << 6; // Escalado a 16 bits
+            report.wheel = raw_wheel << 6;
             
-            // 2. Botones principales (Byte 1 bits 2-7, Byte 2 bits 0-5)
-            report.cross    = (d[1] & 0x04) ? 1 : 0;
-            report.square   = (d[1] & 0x08) ? 1 : 0;
-            report.circle   = (d[1] & 0x10) ? 1 : 0;
-            report.triangle = (d[1] & 0x20) ? 1 : 0;
-            report.R1       = (d[1] & 0x40) ? 1 : 0;
-            report.L1       = (d[1] & 0x80) ? 1 : 0;
-            
-            report.R2       = (d[2] & 0x01) ? 1 : 0;
-            report.L2       = (d[2] & 0x02) ? 1 : 0;
-            report.select   = (d[2] & 0x04) ? 1 : 0;
-            report.start    = (d[2] & 0x08) ? 1 : 0;
-            report.R3       = (d[2] & 0x10) ? 1 : 0;
-            report.L3       = (d[2] & 0x20) ? 1 : 0;
-            
-            // 3. D-Pad (Byte 3 bits 0-3)
-            uint8_t hat = d[3] & 0x0F;
-            report.dpad = (hat < 8) ? hat : 8;
-            
-            // 4. Palancas Secuenciales (Byte 3 bits 6-7)
-            // Las mapeamos a R2/L2 para que los juegos las usen como levas
-            if (d[3] & 0x40) report.R2 = 1; 
-            if (d[3] & 0x80) report.L2 = 1; 
-            
-            // 5. Pedales (Bytes 5, 6, 7). El G25 usa 0=presionado, PS5 usa 255=presionado.
+            // Pedales
             uint8_t gas = 255 - d[5];
             uint8_t brake = 255 - d[6];
             uint8_t clutch = 255 - d[7];
             
-            // Mapeo a 16 bits (Alta resolución)
             report.throttle = gas << 8;
-            report.brake    = brake << 8;
-            report.clutch   = clutch << 8; // <-- ¡El embrague ahora SÍ existe!
+            report.brake = brake << 8;
+            report.clutch = clutch << 8;
             
-            // Bloque oculto para GT7 (8 bits)
             report.whatever[0] = gas;
             report.whatever[1] = brake;
-            report.whatever[2] = clutch; 
+            report.whatever[2] = clutch;
             
-            // 6. PALANCA DE CAMBIOS EN H (BYTE 4)
-            // La inyectamos en whatever[3] que es donde GT7/Grid Legends la buscan
+            // Botones y D-Pad
+            report.cross = (d[1] & 0x04) ? 1 : 0;
+            report.square = (d[1] & 0x08) ? 1 : 0;
+            report.circle = (d[1] & 0x10) ? 1 : 0;
+            report.triangle = (d[1] & 0x20) ? 1 : 0;
+            report.R1 = (d[1] & 0x40) ? 1 : 0;
+            report.L1 = (d[1] & 0x80) ? 1 : 0;
+            
+            report.R2 = (d[2] & 0x01) ? 1 : 0;
+            report.L2 = (d[2] & 0x02) ? 1 : 0;
+            report.select = (d[2] & 0x04) ? 1 : 0;
+            report.start = (d[2] & 0x08) ? 1 : 0;
+            report.R3 = (d[2] & 0x10) ? 1 : 0;
+            report.L3 = (d[2] & 0x20) ? 1 : 0;
+            
+            uint8_t hat = d[3] & 0x0F;
+            report.dpad = (hat < 8) ? hat : 8;
+            
+            // Levas secuenciales (mapeadas a R2/L2)
+            if (d[3] & 0x40) report.R2 = 1; 
+            if (d[3] & 0x80) report.L2 = 1; 
+            
+            // Palanca en H (Byte 4)
             report.whatever[3] = 0;
-            if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
-            if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
-            if (d[4] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
-            if (d[4] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
-            if (d[4] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
-            if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
-            if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
+            if (d[4] & 0x01) report.whatever[3] |= (1 << 0);
+            if (d[4] & 0x02) report.whatever[3] |= (1 << 1);
+            if (d[4] & 0x04) report.whatever[3] |= (1 << 2);
+            if (d[4] & 0x08) report.whatever[3] |= (1 << 3);
+            if (d[4] & 0x10) report.whatever[3] |= (1 << 4);
+            if (d[4] & 0x20) report.whatever[3] |= (1 << 5);
+            if (d[4] & 0x40) report.whatever[3] |= (1 << 6);
             
-            // Botón físico de la palanca de cambios (Byte 4 bit 7)
             report.touchpad = (d[4] & 0x80) ? 1 : 0;
         }
     }
