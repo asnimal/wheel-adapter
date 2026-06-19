@@ -56,4 +56,18 @@ typedef struct __attribute__((packed)) {
     uint8_t brake;
 } df_report_t;
 
+// Estructura para el modo nativo del Logitech G25 (12 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t x_lsb;
+    uint8_t x_msb;
+    uint8_t throttle;
+    uint8_t brake;
+    uint8_t clutch;
+    uint8_t buttons1; // D-pad y botones principales
+    uint8_t buttons2; // Levas y botones del volante
+    uint8_t buttons3; // Marchas en H
+    uint8_t buttons4; 
+    uint8_t pad[3];   
+} g25_native_report_t;
+
 #endif
