@@ -1,9 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include "bsp/board_api.h"
 #include "tusb.h"
+
 #include "pico/stdio.h"
+
 #include "reports.h"
 
 uint8_t nonce_id;
@@ -13,11 +16,14 @@ uint8_t signature[1064];
 uint8_t signature_part = 0;
 uint8_t signature_ready = 0;
 uint8_t nonce_ready = 0;
+
 uint8_t expected_part = 0;
+
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
+
 bool busy = false;
 
 enum {
@@ -27,7 +33,9 @@ enum {
     WAITING_FOR_SIG = 3,
     RECEIVING_SIG = 4,
 };
+
 uint8_t state = IDLE;
+
 bool initialized = true;
 
 uint8_t get_buffer[64];
@@ -47,6 +55,7 @@ const uint8_t output_0x03[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
+
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
 void report_init() {
@@ -63,11 +72,14 @@ void hid_task() {
     if (!tud_hid_ready()) {
         return;
     }
-    report.PS = report.select && report.start;
+
+    report.PS = report.L3 && report.R3;
+
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
         memcpy(&prev_report, &report, sizeof(report));
     }
+
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
         if (wheel_device) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
@@ -79,17 +91,8 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        
-        // ¡LA CLAVE DEL ÉXITO!
-        // El comando para cambiar a Modo Nativo (0xC299) DEBE enviarse por SET_REPORT (Control Endpoint).
-        // Las IAs anteriores usaban tuh_hid_send_report (Interrupción) y el G25 lo ignoraba.
-        uint8_t native_cmd[] = { 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        tuh_hid_set_report(wheel_device, wheel_instance, 0xF8, HID_REPORT_TYPE_OUTPUT, native_cmd, sizeof(native_cmd));
-        printf(">> Enviando comando de Modo Nativo (0xF8) al G25...\n");
-
-        // Desactivar autocenter
-        uint8_t disable_autocenter[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        tuh_hid_set_report(wheel_device, wheel_instance, 0xF5, HID_REPORT_TYPE_OUTPUT, disable_autocenter, sizeof(disable_autocenter));
+        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // disable autocenter
+        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
 }
 
@@ -130,6 +133,7 @@ int main() {
     report_init();
     tusb_init();
     stdio_init_all();
+
     while (1) {
         tuh_task();
         tud_task();
@@ -137,6 +141,7 @@ int main() {
         auth_task();
         wheel_init_task();
     }
+
     return 0;
 }
 
@@ -149,6 +154,7 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
+                // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
@@ -193,7 +199,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {
+        case 0xF1: {  // GET_SIGNATURE_NONCE
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
@@ -210,7 +216,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             }
             return reqlen;
         }
-        case 0xF2: {
+        case 0xF2: {  // GET_SIGNING_STATE
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
@@ -222,7 +228,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {
+    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
@@ -246,6 +252,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
+            // pass everything through to the wheel
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
@@ -255,21 +262,15 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t vid;
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
+
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
-    
-    if ((vid == 0x046d) && (pid == 0xc294 || pid == 0xc299)) {
+
+    if ((vid == 0x046d) && (pid == 0xC299)) {  // Driving Force (or another wheel in compatibility mode)
         wheel_device = dev_addr;
         wheel_instance = instance;
         tuh_hid_receive_report(dev_addr, instance);
-        
-        if (pid == 0xc294) {
-            printf(">> G25 detectado en MODO COMPATIBILIDAD (0xC294). Intentando cambiar a Nativo...\n");
-            initialized = false;
-        } else {
-            printf(">> G25 detectado en MODO NATIVO (0xC299). ¡Perfecto!\n");
-            initialized = true;
-        }
-    } else {
+        initialized = false;
+    } else {  // assume everything else is the controller we use for authentication
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -290,91 +291,26 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0) {
         if (dev_addr == wheel_device) {
-            uint16_t vid;
-            uint16_t pid;
-            tuh_vid_pid_get(dev_addr, &vid, &pid);
-            
-            if (pid == 0xc294) {
-                // Modo Básico Intacto (por si el comando de modo nativo falla)
-                df_report_t* df = (df_report_t*) report_;
-                report.wheel = df->wheel << 6;
-                report.throttle = df->throttle << 8;
-                report.brake = df->brake << 8;
-                report.dpad = df->hat;
-                report.cross = df->cross;
-                report.square = df->square;
-                report.circle = df->circle;
-                report.triangle = df->triangle;
-                report.L2 = df->L2;
-                report.L1 = df->L1;
-                report.R2 = df->R2;
-                report.R1 = df->R1;
-                report.select = df->select;
-                report.start = df->start;
-                report.R3 = df->R3;
-                report.L3 = df->L3;
-            }
-            else if (pid == 0xc299 && len >= 8) {
-                // ¡MODO G25 NATIVO ACTIVADO! (Aquí es donde aparecen el embrague y la palanca en H)
-                uint8_t const* d = report_;
-                
-                // Volante (10 bits reales)
-                uint16_t raw_wheel = d[0] | ((d[1] & 0x3F) << 8);
-                report.wheel = raw_wheel << 6;
-                
-                // Pedales (Invertidos: G25 usa 0=presionado, PS5 usa 0=sin presionar)
-                uint8_t gas = 255 - d[5];
-                uint8_t brake = 255 - d[6];
-                uint8_t clutch = 255 - d[7];
-                
-                // Mapeo Alta Resolución para GT7 (16 bits)
-                report.throttle = gas << 8;
-                report.brake    = brake << 8;
-                report.clutch   = clutch << 8;
-                
-                // GT7 busca los pedales también en el bloque oculto "Vendor Defined"
-                report.whatever[0] = gas;
-                report.whatever[1] = brake;
-                report.whatever[2] = clutch; 
-                
-                // D-pad (Bits 0-3 del Byte 3)
-                uint8_t hat = d[3] & 0x0F;
-                report.dpad = (hat < 8) ? hat : 8;
-                
-                // Botones principales del volante
-                report.cross    = (d[1] & 0x40) ? 1 : 0;
-                report.square   = (d[1] & 0x80) ? 1 : 0;
-                report.circle   = (d[2] & 0x01) ? 1 : 0;
-                report.triangle = (d[2] & 0x02) ? 1 : 0;
-                report.R1       = (d[2] & 0x04) ? 1 : 0;
-                report.L1       = (d[2] & 0x08) ? 1 : 0;
-                report.R2       = (d[2] & 0x10) ? 1 : 0;
-                report.L2       = (d[2] & 0x20) ? 1 : 0;
-                report.select   = (d[2] & 0x40) ? 1 : 0;
-                report.start    = (d[2] & 0x80) ? 1 : 0;
-                
-                // Botones R3/L3
-                report.R3 = (d[3] & 0x10) ? 1 : 0;
-                report.L3 = (d[3] & 0x20) ? 1 : 0;
-                
-                // Palancas Secuenciales (Mapeadas a R2/L2 para que funcionen en juegos)
-                if (d[3] & 0x40) report.R2 = 1; 
-                if (d[3] & 0x80) report.L2 = 1; 
-                
-                // PALANCA DE CAMBIOS EN H (BYTE 4)
-                report.whatever[3] = 0;
-                if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
-                if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
-                if (d[4] & 0x04) report.whatever[3] |= (1 << 2); // 3ª Marcha
-                if (d[4] & 0x08) report.whatever[3] |= (1 << 3); // 4ª Marcha
-                if (d[4] & 0x10) report.whatever[3] |= (1 << 4); // 5ª Marcha
-                if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
-                if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
-                
-                // Botón físico de la palanca
-                report.touchpad = (d[4] & 0x80) ? 1 : 0;
-            }
+            df_report_t* df = (df_report_t*) report_;
+            report.wheel = df->wheel << 6;
+            report.throttle = df->throttle << 8;
+            report.brake = df->brake << 8;
+            report.clutch = df->clutch << 8;
+            report.dpad = df->hat;
+            report.cross = df->cross;
+            report.square = df->square;
+            report.circle = df->circle;
+            report.triangle = df->triangle;
+            report.L2 = df->L2;
+            report.L1 = df->L1;
+            report.R2 = df->R2;
+            report.R1 = df->R1;
+            report.select = df->select;
+            report.start = df->start;
+            report.R3 = df->R3;
+            report.L3 = df->L3;
         }
     }
+
     tuh_hid_receive_report(dev_addr, instance);
 }
