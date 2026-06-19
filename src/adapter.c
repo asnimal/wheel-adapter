@@ -48,13 +48,6 @@ const uint8_t output_0x03[] = {
 };
 const uint8_t output_0xf3[] = { 0x0, 0x38, 0x38, 0, 0, 0, 0 };
 
-// VARIABLES STATIC PARA LA TRANSFERENCIA DE CONTROL
-static tusb_control_request_t native_request;
-// EL PAYLOAD CORRECTO: 7 bytes, empezando con 0xF8
-static uint8_t native_cmd[7] = {0xF8, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00}; 
-static tuh_xfer_t native_xfer;
-static bool request_prepared = false;
-
 void report_init() {
     memset(&report, 0, sizeof(report));
     report.lx = 0x80;
@@ -81,43 +74,12 @@ void hid_task() {
     }
 }
 
-void control_xfer_cb(tuh_xfer_t* xfer) {
-    if (xfer->result == XFER_RESULT_SUCCESS) {
-        printf(">> [EXITO] Comando Feature Report 0xF8 enviado. Esperando reinicio del G25...\n");
-    } else {
-        printf(">> [FALLO] El comando no se pudo enviar. Codigo: %d\n", xfer->result);
-    }
-}
-
 void wheel_init_task() {
     if (wheel_device && !initialized) {
-        if (!request_prepared) {
-            // ¡AQUÍ ESTABA EL ERROR! 
-            // Antes usábamos 0x02 (Output Report). Logitech EXIGE 0x03 (Feature Report).
-            uint8_t req_data[8] = { 
-                0x21,       // bmRequestType (Host-to-Device, Class, Interface)
-                0x09,       // bRequest (SET_REPORT)
-                0xF8, 0x03, // wValue (0x03F8 -> Report Type 3=FEATURE, Report ID 0xF8)
-                0x00, 0x00, // wIndex (Interface 0)
-                0x07, 0x00  // wLength (7 bytes)
-            };
-            memcpy(&native_request, req_data, 8);
-            
-            native_xfer.daddr      = wheel_device;
-            native_xfer.ep_addr    = 0; 
-            native_xfer.setup      = &native_request;
-            native_xfer.buffer     = native_cmd;
-            native_xfer.complete_cb = control_xfer_cb;
-            native_xfer.user_data  = 0;
-            
-            request_prepared = true;
-        }
-        
-        printf(">> Intentando forzar cambio a Modo Nativo (Blando)...\n");
-        bool ret = tuh_control_xfer(&native_xfer);
-        if (ret) {
-            initialized = true; 
-        }
+        initialized = true;
+        // Comando para desactivar el autocenter (ayuda a la sensación de "modo blando")
+        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
 }
 
@@ -259,26 +221,12 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     tuh_vid_pid_get(dev_addr, &vid, &pid);
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
     
+    // Aceptamos cualquier volante Logitech (0x046d)
     if (vid == 0x046d) {
-        if (pid == 0xc294) {
-            printf(">> G25 detectado en MODO DURO (Compat 0xC294). Cambiando a Blando...\n");
-            wheel_device = dev_addr;
-            wheel_instance = instance;
-            tuh_hid_receive_report(dev_addr, instance);
-            initialized = false; 
-            request_prepared = false; 
-        } 
-        else if (pid == 0xc299) {
-            printf(">> ¡¡¡EXITO!!! G25 en MODO BLANDO (Nativo 0xC299). Embrague y H-Shift activos.\n");
-            wheel_device = dev_addr;
-            wheel_instance = instance;
-            tuh_hid_receive_report(dev_addr, instance);
-            initialized = true; 
-        }
-        else {
-            auth_device = dev_addr;
-            auth_instance = instance;
-        }
+        wheel_device = dev_addr;
+        wheel_instance = instance;
+        tuh_hid_receive_report(dev_addr, instance);
+        initialized = false;
     } else {
         auth_device = dev_addr;
         auth_instance = instance;
@@ -299,55 +247,15 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
-        uint16_t vid, pid;
-        tuh_vid_pid_get(dev_addr, &vid, &pid);
+        // ¡LA CLAVE! Leemos los bytes en crudo, ignorando el struct df_report_t que estaba mal alineado.
+        uint8_t const* d = report_;
         
-        if (pid == 0xc294) {
-            // Fallback (Modo Duro)
-            df_report_t* df = (df_report_t*) report_;
-            report.wheel = df->wheel << 6;
-            report.throttle = df->throttle << 8;
-            report.brake = df->brake << 8;
-            report.dpad = df->hat;
-            report.cross = df->cross;
-            report.square = df->square;
-            report.circle = df->circle;
-            report.triangle = df->triangle;
-            report.L2 = df->L2;
-            report.L1 = df->L1;
-            report.R2 = df->R2;
-            report.R1 = df->R1;
-            report.select = df->select;
-            report.start = df->start;
-            report.R3 = df->R3;
-            report.L3 = df->L3;
-        }
-        else if (pid == 0xc299 && len >= 8) {
-            // ¡MODO BLANDO (NATIVO) G25!
-            uint8_t const* d = report_;
-            
-            // 1. Volante
+        if (len >= 8) {
+            // 1. Volante (10 bits reales en los bytes 0 y 1)
             uint16_t raw_wheel = d[0] | ((d[1] & 0x03) << 8);
-            report.wheel = raw_wheel << 6;
+            report.wheel = raw_wheel << 6; // Escalado a 16 bits
             
-            // 2. Pedales (Invertidos)
-            uint8_t gas = 255 - d[5];
-            uint8_t brake = 255 - d[6];
-            uint8_t clutch = 255 - d[7];
-            
-            report.throttle = gas << 8;
-            report.brake    = brake << 8;
-            report.clutch   = clutch << 8;
-            
-            report.whatever[0] = gas;
-            report.whatever[1] = brake;
-            report.whatever[2] = clutch; 
-            
-            // 3. D-Pad
-            uint8_t hat = d[3] & 0x0F;
-            report.dpad = (hat < 8) ? hat : 8;
-            
-            // 4. Botones principales
+            // 2. Botones principales (Byte 1 bits 2-7, Byte 2 bits 0-5)
             report.cross    = (d[1] & 0x04) ? 1 : 0;
             report.square   = (d[1] & 0x08) ? 1 : 0;
             report.circle   = (d[1] & 0x10) ? 1 : 0;
@@ -362,11 +270,32 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (d[2] & 0x10) ? 1 : 0;
             report.L3       = (d[2] & 0x20) ? 1 : 0;
             
-            // 5. Palancas Secuenciales (Mapeadas a R2/L2)
+            // 3. D-Pad (Byte 3 bits 0-3)
+            uint8_t hat = d[3] & 0x0F;
+            report.dpad = (hat < 8) ? hat : 8;
+            
+            // 4. Palancas Secuenciales (Byte 3 bits 6-7)
+            // Las mapeamos a R2/L2 para que los juegos las usen como levas
             if (d[3] & 0x40) report.R2 = 1; 
             if (d[3] & 0x80) report.L2 = 1; 
             
+            // 5. Pedales (Bytes 5, 6, 7). El G25 usa 0=presionado, PS5 usa 255=presionado.
+            uint8_t gas = 255 - d[5];
+            uint8_t brake = 255 - d[6];
+            uint8_t clutch = 255 - d[7];
+            
+            // Mapeo a 16 bits (Alta resolución)
+            report.throttle = gas << 8;
+            report.brake    = brake << 8;
+            report.clutch   = clutch << 8; // <-- ¡El embrague ahora SÍ existe!
+            
+            // Bloque oculto para GT7 (8 bits)
+            report.whatever[0] = gas;
+            report.whatever[1] = brake;
+            report.whatever[2] = clutch; 
+            
             // 6. PALANCA DE CAMBIOS EN H (BYTE 4)
+            // La inyectamos en whatever[3] que es donde GT7/Grid Legends la buscan
             report.whatever[3] = 0;
             if (d[4] & 0x01) report.whatever[3] |= (1 << 0); // 1ª Marcha
             if (d[4] & 0x02) report.whatever[3] |= (1 << 1); // 2ª Marcha
@@ -376,6 +305,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             if (d[4] & 0x20) report.whatever[3] |= (1 << 5); // 6ª Marcha
             if (d[4] & 0x40) report.whatever[3] |= (1 << 6); // Marcha Atrás
             
+            // Botón físico de la palanca de cambios (Byte 4 bit 7)
             report.touchpad = (d[4] & 0x80) ? 1 : 0;
         }
     }
