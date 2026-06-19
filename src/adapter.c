@@ -17,7 +17,7 @@ void report_init() {
 void hid_task() {
     if (!tud_hid_ready()) return;
 
-    // SIMULACIÓN BOTÓN PS: Si pulsas Select y Start a la vez, se activa el PS
+    // SIMULACIÓN BOTÓN PS: Se activa pulsando los dos centrales (Select y Start)
     report.PS = (report.select && report.start);
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -30,15 +30,15 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     if (dev_addr == wheel_device && len >= 12) {
         g25_native_report_t* native = (g25_native_report_t*) report_;
 
-        // CALIBRACIÓN: Combinamos LSB y MSB para obtener la posición real del volante
-        uint16_t wheel_val = (native->x_lsb | (native->x_msb << 8));
-        report.wheel = wheel_val;
+        // CALIBRACIÓN: Combinamos los bytes para el eje del volante
+        report.wheel = (native->x_lsb | (native->x_msb << 8));
 
+        // Mapeo de pedales
         report.throttle = native->throttle << 8;
         report.brake = native->brake << 8;
         report.clutch = native->clutch << 8;
 
-        // MAPEO DE BOTONES
+        // Mapeo de botones (bits específicos del G25)
         report.select = (native->buttons2 & 0x10) ? 1 : 0;
         report.start = (native->buttons2 & 0x20) ? 1 : 0;
         report.cross = (native->buttons1 & 0x20) ? 1 : 0;
