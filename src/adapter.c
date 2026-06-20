@@ -21,6 +21,7 @@ uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
+uint16_t wheel_pid = 0; // NUEVO: Para almacenar el PID actual del volante
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
@@ -73,7 +74,6 @@ void hid_task() {
         return;
     }
 
-    // Mantiene tu configuración: botón PS activo presionando L3 + R3 a la vez
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -92,9 +92,17 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // Mantiene la inicialización extendida que corrige el centrado del volante
-        static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        
+        if (wheel_pid == 0xc294) {
+            // El volante acaba de conectarse en modo antiguo.
+            // Forzamos el reinicio a modo G25 Nativo (0xc299).
+            static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        } else if (wheel_pid == 0xc299) {
+            // El volante ya está en modo nativo 100%. Desactivamos su muelle interno por si acaso.
+            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        }
     }
 }
 
@@ -156,7 +164,6 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
-                // printf(".");
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
@@ -201,7 +208,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {  // GET_SIGNATURE_NONCE
+        case 0xF1: {  
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
@@ -218,7 +225,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             }
             return reqlen;
         }
-        case 0xF2: {  // GET_SIGNING_STATE
+        case 0xF2: {  
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
@@ -230,7 +237,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
+    if (report_id == 0xF0) {  
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
@@ -254,17 +261,11 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            // MEJORA FILTRO ANTI-DUREZA:
-            // buffer[1] contiene la instrucción de Force Feedback enviada por la consola/juego.
-            // 0x12 activa el muelle de retorno artificial pesado.
-            // 0xf5 sobreescribe el autocentrado activando la dureza por defecto.
-            // Al descartar (return) estas dos órdenes, el volante ignora el modo duro y se mantiene suave.
+            // Mantenemos el filtro que bloquea las órdenes de endurecer artificialmente el volante
             uint8_t cmd = buffer[1];
             if (cmd == 0x12 || cmd == 0xf5) {
                 return;
             }
-
-            // Si pasa el filtro, enviamos la física real al volante
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
@@ -277,12 +278,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
-    if ((vid == 0x046d) && (pid == 0xc294)) {  // Driving Force (or another wheel in compatibility mode)
+    // NUEVO: Aceptamos ambos, el modo antiguo (0xc294) y el modo G25 Nativo (0xc299)
+    if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
+        wheel_pid = pid; // Guardamos en qué modo está conectado
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
-    } else {  // assume everything else is the controller we use for authentication
+    } else {  
         auth_device = dev_addr;
         auth_instance = instance;
     }
@@ -293,6 +296,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
+        wheel_pid = 0;
     }
     if (dev_addr == auth_device) {
         auth_device = 0;
@@ -303,26 +307,62 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0) {
         if (dev_addr == wheel_device) {
-            df_report_t* df = (df_report_t*) report_;
-            report.wheel = df->wheel << 6;
-            report.throttle = df->throttle << 8;
-            report.brake = df->brake << 8;
-            report.dpad = df->hat;
-            report.cross = df->cross;
-            report.square = df->square;
-            report.circle = df->circle;
-            report.triangle = df->triangle;
-            report.L2 = df->L2;
-            report.L1 = df->L1;
-            report.R2 = df->R2;
-            report.R1 = df->R1;
             
-            // Mantiene tu orden personalizado de botones en la palanca de cambios:
-            // Select, L3, R3, Start de izquierda a derecha.
-            report.select   = df->L3;
-            report.L3       = df->select;
-            report.R3       = df->start;
-            report.start    = df->R3;
+            // PROCESAMOS LOS DATOS DEPENDIENDO DEL MODO EN EL QUE ESTÉ EL VOLANTE
+            if (wheel_pid == 0xc299) {
+                // MODO G25 NATIVO
+                g25_report_t* g25 = (g25_report_t*) report_;
+                
+                // El G25 reporta el giro en 14 bits, la PS5/G29 lo espera adaptado
+                report.wheel = g25->wheel << 2;
+                
+                // En modo nativo, el G25 devuelve los pedales invertidos (255 suelto, 0 pisado)
+                // Adaptamos las escalas y las invertimos correctamente para la consola
+                report.throttle = (255 - g25->throttle) << 8;
+                report.brake    = (255 - g25->brake) << 8;
+                
+                // El embrague en la PS5 se espera en 0xFFFF por defecto cuando está suelto
+                report.clutch   = g25->clutch << 8 | g25->clutch; 
+
+                report.dpad     = g25->hat;
+                report.cross    = g25->cross;
+                report.square   = g25->square;
+                report.circle   = g25->circle;
+                report.triangle = g25->triangle;
+                report.L2       = g25->L2;
+                report.L1       = g25->L1;
+                report.R2       = g25->R2;
+                report.R1       = g25->R1;
+                
+                // Mantenemos tu configuración personalizada en la palanca de cambios
+                report.select   = g25->L3;
+                report.L3       = g25->select;
+                report.R3       = g25->start;
+                report.start    = g25->R3;
+                
+            } else if (wheel_pid == 0xc294) {
+                // MODO DRIVING FORCE (Se usa solo durante el arranque hasta que se reinicia)
+                df_report_t* df = (df_report_t*) report_;
+                
+                report.wheel    = df->wheel << 6;
+                report.throttle = df->throttle << 8;
+                report.brake    = df->brake << 8;
+                
+                report.dpad     = df->hat;
+                report.cross    = df->cross;
+                report.square   = df->square;
+                report.circle   = df->circle;
+                report.triangle = df->triangle;
+                report.L2       = df->L2;
+                report.L1       = df->L1;
+                report.R2       = df->R2;
+                report.R1       = df->R1;
+                
+                report.select   = df->L3;
+                report.L3       = df->select;
+                report.R3       = df->start;
+                report.start    = df->R3;
+            }
         }
     }
 
