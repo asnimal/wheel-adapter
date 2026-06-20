@@ -65,7 +65,7 @@ void report_init() {
     report.ly = 0x80;
     report.rx = 0x80;
     report.ry = 0x80;
-    report.wheel = 0x8000; // Centrado absoluto por defecto (evita desvíos al arrancar)
+    report.wheel = 0x8000;
     report.throttle = 0;
     report.brake = 0;
     report.clutch = 0;
@@ -77,8 +77,13 @@ void hid_task() {
         return;
     }
 
-    // Botón PS combinación select + start seguro
-    report.PS = report.select && report.start;
+    // MAPEO SOLICITADO: L3 + R3 (botones rojos centrales de la palanca) actúan como botón PS
+    if (report.L3 && report.R3) {
+        report.PS = 1;
+    } else {
+        // Mantiene la combinación clásica select + start por seguridad si no se usan los rojos
+        report.PS = report.select && report.start;
+    }
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
@@ -95,15 +100,15 @@ void hid_task() {
 
 void wheel_init_task() {
     if (wheel_device && !initialized) {
-        // Damos 4 segundos completos para asegurar que el autocalibrado motorizado termine sin cortes
-        if (board_millis() - mount_time > 4000) {
+        // SOLICITADO: Espera estricta de 15 segundos (15000ms) para descartar problemas de tiempo
+        if (board_millis() - mount_time > 15000) {
             initialized = true;
             if (wheel_pid == 0xc294) {
-                // Comando extendido e inequívoco para activar el G25 en modo completo de 5 ejes y embrague
-                static uint8_t buf[] = { 0xf8, 0x12, 0x02, 0x00, 0x00, 0x00, 0x00 };
+                // Comando de inicialización nativo específico y genuino para Logitech G25
+                static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             } else {
-                // Desactivar centrado artificial una vez estabilizado en modo nativo
+                // Desactivar el centrado artificial duro una vez que el volante responde en modo nativo
                 static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             }
@@ -284,18 +289,14 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
         if (wheel_pid == 0xc299) {
-            // RE-MAPEO INTEGRAL PARA EL MODO NATIVO DEL G25 CON REGLA DE 3 PEDALES Y PALANCA
-            
-            // 1. Dirección (Alineamos los 14 bits nativos del volante al rango esperado)
+            // Mapeo nativo completo cuando el G25 acepte el comando de cambio de modo
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2; 
 
-            // 2. Pedales analógicos reales (Del 0 al 255 invertidos, desplazados a los bytes exactos)
             report.throttle = (255 - report_[2]) << 8;
             report.brake    = (255 - report_[3]) << 8;
             report.clutch   = (255 - report_[4]) << 8;
 
-            // 3. Desenredar Botones y Cruceta (Limpieza estricta de bits fantasmas)
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
             report.cross    = (report_[5] & 0x20) ? 1 : 0;
@@ -312,12 +313,12 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[6] & 0x80) ? 1 : 0;
 
         } else if (wheel_pid == 0xc294) {
-            // Mapeo seguro provisional durante el arranque en frío
+            // Mapeo clásico Driving Force (Activo durante los primeros 15 segundos)
             df_report_t* df = (df_report_t*) report_;
             report.wheel    = df->wheel << 6;
             report.throttle = df->throttle << 8;
             report.brake    = df->brake << 8;
-            report.clutch   = 0;
+            report.clutch   = 0; // Se fuerza a 0 para que no marque 100% estático en el arranque
             report.dpad     = df->hat;
             report.cross    = df->cross;
             report.square   = df->square;
