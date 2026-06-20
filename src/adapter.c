@@ -47,7 +47,7 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// G29
+// G29 descriptor output standard
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -65,7 +65,9 @@ void report_init() {
     report.ly = 0x80;
     report.rx = 0x80;
     report.ry = 0x80;
-    report.wheel = 0x8000;
+    report.wheel = 0x8000; // Centrado absoluto por defecto (evita desvíos al arrancar)
+    report.throttle = 0;
+    report.brake = 0;
     report.clutch = 0;
     memcpy(&prev_report, &report, sizeof(report));
 }
@@ -75,6 +77,7 @@ void hid_task() {
         return;
     }
 
+    // Botón PS combinación select + start seguro
     report.PS = report.select && report.start;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -92,15 +95,15 @@ void hid_task() {
 
 void wheel_init_task() {
     if (wheel_device && !initialized) {
-        // Espera 3.5 segundos para que termine completamente de calibrarse físicamente
-        if (board_millis() - mount_time > 3500) {
+        // Damos 4 segundos completos para asegurar que el autocalibrado motorizado termine sin cortes
+        if (board_millis() - mount_time > 4000) {
             initialized = true;
             if (wheel_pid == 0xc294) {
-                // Comando mágico correcto para despertar el modo nativo del G25
-                static uint8_t buf[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                // Comando extendido e inequívoco para activar el G25 en modo completo de 5 ejes y embrague
+                static uint8_t buf[] = { 0xf8, 0x12, 0x02, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
-            } else if (wheel_pid == 0xc299) {
-                // Si ya entró en modo nativo, desactivamos el centrado artificial duro
+            } else {
+                // Desactivar centrado artificial una vez estabilizado en modo nativo
                 static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             }
@@ -123,7 +126,6 @@ void auth_task() {
                 set_buffer[2] = nonce_part;
                 set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                printf(".");
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
                 nonce_part++;
@@ -162,27 +164,22 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
         busy = false;
         switch (report_id) {
             case 0xF3:
-                printf("Sending nonce to auth controller");
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
-                    printf("\n");
-                    printf("Receiving signature from auth controller");
                 }
                 break;
             case 0xF1:
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
                 signature_part++;
-                printf(".");
                 if (signature_part == 19) {
                     state = IDLE;
                     expected_part = 0;
                     signature_ready = true;
                     signature_part = 0;
-                    printf("\n");
                 }
                 break;
         }
@@ -193,8 +190,6 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if ((dev_addr == auth_device) && (report_id == 0xF0)) {
         busy = false;
         if (nonce_part == 5) {
-            printf("\n");
-            printf("Waiting for auth controller to sign...\n");
             state = WAITING_FOR_SIG;
         }
     }
@@ -214,21 +209,15 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
-            if (signature_part == 0) {
-                printf("Sending signature to PS5");
-            }
-            printf(".");
             memcpy(&buffer[3], &signature[signature_part * 56], 56);
             signature_part++;
             if (signature_part == 19) {
                 signature_part = 0;
-                printf("\n");
                 board_led_write(true);
             }
             return reqlen;
         }
         case 0xF2: {  
-            printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
             memset(&buffer[2], 0, 9);
@@ -245,10 +234,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        if (part == 0) {
-            printf("Getting nonce from PS5");
-        }
-        printf(".");
         if (part > 4) {
             return;
         }
@@ -256,8 +241,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
             nonce_ready = 1;
-            printf("\n");
-            printf("Sending reset to auth controller...\n");
             state = SENDING_RESET;
             nonce_part = 0;
         }
@@ -273,9 +256,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
-
-    // Reconoce tanto el modo inicial (c294) como el nativo del G25 (c299)
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
@@ -290,7 +270,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    printf("tuh_hid_umount_cb\n");
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
@@ -305,23 +284,24 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
         if (wheel_pid == 0xc299) {
-            // MAPEO CORRECTO PARA MODO NATIVO G25
-            uint16_t wheel_val = report_[0] | ((report_[1] & 0x3F) << 8);
-            report.wheel = wheel_val << 2; 
+            // RE-MAPEO INTEGRAL PARA EL MODO NATIVO DEL G25 CON REGLA DE 3 PEDALES Y PALANCA
+            
+            // 1. Dirección (Alineamos los 14 bits nativos del volante al rango esperado)
+            uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
+            report.wheel = raw_wheel << 2; 
 
-            // Los pedales nativos van del 0 al 255 invertidos
+            // 2. Pedales analógicos reales (Del 0 al 255 invertidos, desplazados a los bytes exactos)
             report.throttle = (255 - report_[2]) << 8;
             report.brake    = (255 - report_[3]) << 8;
             report.clutch   = (255 - report_[4]) << 8;
 
-            // D-Pad y botones principales
+            // 3. Desenredar Botones y Cruceta (Limpieza estricta de bits fantasmas)
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
             report.cross    = (report_[5] & 0x20) ? 1 : 0;
             report.circle   = (report_[5] & 0x40) ? 1 : 0;
             report.triangle = (report_[5] & 0x80) ? 1 : 0;
 
-            // Botones secundarios
             report.L1       = (report_[6] & 0x01) ? 1 : 0;
             report.R1       = (report_[6] & 0x02) ? 1 : 0;
             report.L2       = (report_[6] & 0x04) ? 1 : 0;
@@ -332,7 +312,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[6] & 0x80) ? 1 : 0;
 
         } else if (wheel_pid == 0xc294) {
-            // MAPEO DURANTE LA CALIBRACIÓN INICIAL
+            // Mapeo seguro provisional durante el arranque en frío
             df_report_t* df = (df_report_t*) report_;
             report.wheel    = df->wheel << 6;
             report.throttle = df->throttle << 8;
