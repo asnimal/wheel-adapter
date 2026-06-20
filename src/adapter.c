@@ -16,12 +16,11 @@ uint8_t signature[1064];
 uint8_t signature_part = 0;
 uint8_t signature_ready = 0;
 uint8_t nonce_ready = 0;
-
 uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
-uint16_t wheel_pid = 0; // Almacena el PID actual
+uint16_t wheel_pid = 0;
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
@@ -38,6 +37,7 @@ enum {
 uint8_t state = IDLE;
 
 bool initialized = true;
+uint32_t mount_time = 0;
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -65,7 +65,8 @@ void report_init() {
     report.ly = 0x80;
     report.rx = 0x80;
     report.ry = 0x80;
-    report.clutch = 0xFFFF;
+    report.wheel = 0x8000;
+    report.clutch = 0;
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -74,7 +75,7 @@ void hid_task() {
         return;
     }
 
-    report.PS = report.L3 && report.R3;
+    report.PS = report.select && report.start;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
@@ -91,16 +92,18 @@ void hid_task() {
 
 void wheel_init_task() {
     if (wheel_device && !initialized) {
-        initialized = true;
-        
-        if (wheel_pid == 0xc294) {
-            // EL COMANDO CORRECTO: 0xf8, 0x10 obliga al G25 a reiniciar en modo nativo (0xc299)
-            static uint8_t buf[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
-        } else if (wheel_pid == 0xc299) {
-            // Ya estamos en modo nativo. Apagamos cualquier resorte residual
-            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+        // Espera 3.5 segundos para que termine completamente de calibrarse físicamente
+        if (board_millis() - mount_time > 3500) {
+            initialized = true;
+            if (wheel_pid == 0xc294) {
+                // Comando mágico correcto para despertar el modo nativo del G25
+                static uint8_t buf[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+            } else if (wheel_pid == 0xc299) {
+                // Si ya entró en modo nativo, desactivamos el centrado artificial duro
+                static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+            }
         }
     }
 }
@@ -260,11 +263,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            uint8_t cmd = buffer[1];
-            // Bloqueamos las órdenes de endurecimiento (0x12) del juego
-            if (cmd == 0x12 || cmd == 0xf5) {
-                return;
-            }
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
@@ -277,13 +275,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
-    // Aceptamos el modo antiguo (0xc294) y el modo G25 Nativo (0xc299)
+    // Reconoce tanto el modo inicial (c294) como el nativo del G25 (c299)
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
-        wheel_pid = pid; 
-        tuh_hid_receive_report(dev_addr, instance);
+        wheel_pid = pid;
+        mount_time = board_millis();
         initialized = false;
+        tuh_hid_receive_report(dev_addr, instance);
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
@@ -304,68 +303,55 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
-    if (len > 0) {
-        if (dev_addr == wheel_device) {
-            
-            if (wheel_pid == 0xc299) {
-                // LECTURA DIRECTA DE BYTES DEL G25 NATIVO
-                // Es más seguro que usar estructuras que el compilador podría desordenar
-                
-                uint16_t wheel_val = report_[0] | ((report_[1] & 0x3F) << 8);
-                report.wheel = wheel_val << 2; // Escalar 14 bits a 16 bits para la PS5
-                
-                report.throttle = (255 - report_[2]) << 8;
-                report.brake    = (255 - report_[3]) << 8;
-                report.clutch   = (255 - report_[4]) << 8 | (255 - report_[4]);
-                
-                report.dpad     = report_[5] & 0x0F;
-                
-                report.square   = (report_[5] & 0x10) ? 1 : 0;
-                report.cross    = (report_[5] & 0x20) ? 1 : 0;
-                report.circle   = (report_[5] & 0x40) ? 1 : 0;
-                report.triangle = (report_[5] & 0x80) ? 1 : 0;
-                
-                report.L1       = (report_[6] & 0x01) ? 1 : 0;
-                report.R1       = (report_[6] & 0x02) ? 1 : 0;
-                report.L2       = (report_[6] & 0x04) ? 1 : 0;
-                report.R2       = (report_[6] & 0x08) ? 1 : 0;
-                
-                uint8_t orig_select = (report_[6] & 0x10) ? 1 : 0;
-                uint8_t orig_start  = (report_[6] & 0x20) ? 1 : 0;
-                uint8_t orig_L3     = (report_[6] & 0x40) ? 1 : 0;
-                uint8_t orig_R3     = (report_[6] & 0x80) ? 1 : 0;
-                
-                // Tu mapeo personalizado (Izquierda a Derecha: Select, L3, R3, Start)
-                report.select   = orig_L3;
-                report.L3       = orig_select;
-                report.R3       = orig_start;
-                report.start    = orig_R3;
-                
-            } else if (wheel_pid == 0xc294) {
-                // LECTURA DURANTE EL ARRANQUE ANTES DEL REINICIO
-                df_report_t* df = (df_report_t*) report_;
-                
-                report.wheel    = df->wheel << 6;
-                report.throttle = df->throttle << 8;
-                report.brake    = df->brake << 8;
-                
-                report.dpad     = df->hat;
-                report.cross    = df->cross;
-                report.square   = df->square;
-                report.circle   = df->circle;
-                report.triangle = df->triangle;
-                report.L2       = df->L2;
-                report.L1       = df->L1;
-                report.R2       = df->R2;
-                report.R1       = df->R1;
-                
-                report.select   = df->L3;
-                report.L3       = df->select;
-                report.R3       = df->start;
-                report.start    = df->R3;
-            }
+    if (len > 0 && dev_addr == wheel_device) {
+        if (wheel_pid == 0xc299) {
+            // MAPEO CORRECTO PARA MODO NATIVO G25
+            uint16_t wheel_val = report_[0] | ((report_[1] & 0x3F) << 8);
+            report.wheel = wheel_val << 2; 
+
+            // Los pedales nativos van del 0 al 255 invertidos
+            report.throttle = (255 - report_[2]) << 8;
+            report.brake    = (255 - report_[3]) << 8;
+            report.clutch   = (255 - report_[4]) << 8;
+
+            // D-Pad y botones principales
+            report.dpad     = report_[5] & 0x0F;
+            report.square   = (report_[5] & 0x10) ? 1 : 0;
+            report.cross    = (report_[5] & 0x20) ? 1 : 0;
+            report.circle   = (report_[5] & 0x40) ? 1 : 0;
+            report.triangle = (report_[5] & 0x80) ? 1 : 0;
+
+            // Botones secundarios
+            report.L1       = (report_[6] & 0x01) ? 1 : 0;
+            report.R1       = (report_[6] & 0x02) ? 1 : 0;
+            report.L2       = (report_[6] & 0x04) ? 1 : 0;
+            report.R2       = (report_[6] & 0x08) ? 1 : 0;
+            report.select   = (report_[6] & 0x10) ? 1 : 0;
+            report.start    = (report_[6] & 0x20) ? 1 : 0;
+            report.L3       = (report_[6] & 0x40) ? 1 : 0;
+            report.R3       = (report_[6] & 0x80) ? 1 : 0;
+
+        } else if (wheel_pid == 0xc294) {
+            // MAPEO DURANTE LA CALIBRACIÓN INICIAL
+            df_report_t* df = (df_report_t*) report_;
+            report.wheel    = df->wheel << 6;
+            report.throttle = df->throttle << 8;
+            report.brake    = df->brake << 8;
+            report.clutch   = 0;
+            report.dpad     = df->hat;
+            report.cross    = df->cross;
+            report.square   = df->square;
+            report.circle   = df->circle;
+            report.triangle = df->triangle;
+            report.L2       = df->L2;
+            report.L1       = df->L1;
+            report.R2       = df->R2;
+            report.R1       = df->R1;
+            report.select   = df->select;
+            report.start    = df->start;
+            report.R3       = df->R3;
+            report.L3       = df->L3;
         }
     }
-
     tuh_hid_receive_report(dev_addr, instance);
 }
