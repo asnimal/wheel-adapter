@@ -21,7 +21,7 @@ uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
-uint16_t wheel_pid = 0; // NUEVO: Para almacenar el PID actual del volante
+uint16_t wheel_pid = 0; // Almacena el PID actual
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
@@ -94,12 +94,11 @@ void wheel_init_task() {
         initialized = true;
         
         if (wheel_pid == 0xc294) {
-            // El volante acaba de conectarse en modo antiguo.
-            // Forzamos el reinicio a modo G25 Nativo (0xc299).
-            static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            // EL COMANDO CORRECTO: 0xf8, 0x10 obliga al G25 a reiniciar en modo nativo (0xc299)
+            static uint8_t buf[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
         } else if (wheel_pid == 0xc299) {
-            // El volante ya está en modo nativo 100%. Desactivamos su muelle interno por si acaso.
+            // Ya estamos en modo nativo. Apagamos cualquier resorte residual
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
         }
@@ -261,8 +260,8 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            // Mantenemos el filtro que bloquea las órdenes de endurecer artificialmente el volante
             uint8_t cmd = buffer[1];
+            // Bloqueamos las órdenes de endurecimiento (0x12) del juego
             if (cmd == 0x12 || cmd == 0xf5) {
                 return;
             }
@@ -278,11 +277,11 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("tuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
-    // NUEVO: Aceptamos ambos, el modo antiguo (0xc294) y el modo G25 Nativo (0xc299)
+    // Aceptamos el modo antiguo (0xc294) y el modo G25 Nativo (0xc299)
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
-        wheel_pid = pid; // Guardamos en qué modo está conectado
+        wheel_pid = pid; 
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
     } else {  
@@ -308,40 +307,42 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     if (len > 0) {
         if (dev_addr == wheel_device) {
             
-            // PROCESAMOS LOS DATOS DEPENDIENDO DEL MODO EN EL QUE ESTÉ EL VOLANTE
             if (wheel_pid == 0xc299) {
-                // MODO G25 NATIVO
-                g25_report_t* g25 = (g25_report_t*) report_;
+                // LECTURA DIRECTA DE BYTES DEL G25 NATIVO
+                // Es más seguro que usar estructuras que el compilador podría desordenar
                 
-                // El G25 reporta el giro en 14 bits, la PS5/G29 lo espera adaptado
-                report.wheel = g25->wheel << 2;
+                uint16_t wheel_val = report_[0] | ((report_[1] & 0x3F) << 8);
+                report.wheel = wheel_val << 2; // Escalar 14 bits a 16 bits para la PS5
                 
-                // En modo nativo, el G25 devuelve los pedales invertidos (255 suelto, 0 pisado)
-                // Adaptamos las escalas y las invertimos correctamente para la consola
-                report.throttle = (255 - g25->throttle) << 8;
-                report.brake    = (255 - g25->brake) << 8;
+                report.throttle = (255 - report_[2]) << 8;
+                report.brake    = (255 - report_[3]) << 8;
+                report.clutch   = (255 - report_[4]) << 8 | (255 - report_[4]);
                 
-                // El embrague en la PS5 se espera en 0xFFFF por defecto cuando está suelto
-                report.clutch   = g25->clutch << 8 | g25->clutch; 
-
-                report.dpad     = g25->hat;
-                report.cross    = g25->cross;
-                report.square   = g25->square;
-                report.circle   = g25->circle;
-                report.triangle = g25->triangle;
-                report.L2       = g25->L2;
-                report.L1       = g25->L1;
-                report.R2       = g25->R2;
-                report.R1       = g25->R1;
+                report.dpad     = report_[5] & 0x0F;
                 
-                // Mantenemos tu configuración personalizada en la palanca de cambios
-                report.select   = g25->L3;
-                report.L3       = g25->select;
-                report.R3       = g25->start;
-                report.start    = g25->R3;
+                report.square   = (report_[5] & 0x10) ? 1 : 0;
+                report.cross    = (report_[5] & 0x20) ? 1 : 0;
+                report.circle   = (report_[5] & 0x40) ? 1 : 0;
+                report.triangle = (report_[5] & 0x80) ? 1 : 0;
+                
+                report.L1       = (report_[6] & 0x01) ? 1 : 0;
+                report.R1       = (report_[6] & 0x02) ? 1 : 0;
+                report.L2       = (report_[6] & 0x04) ? 1 : 0;
+                report.R2       = (report_[6] & 0x08) ? 1 : 0;
+                
+                uint8_t orig_select = (report_[6] & 0x10) ? 1 : 0;
+                uint8_t orig_start  = (report_[6] & 0x20) ? 1 : 0;
+                uint8_t orig_L3     = (report_[6] & 0x40) ? 1 : 0;
+                uint8_t orig_R3     = (report_[6] & 0x80) ? 1 : 0;
+                
+                // Tu mapeo personalizado (Izquierda a Derecha: Select, L3, R3, Start)
+                report.select   = orig_L3;
+                report.L3       = orig_select;
+                report.R3       = orig_start;
+                report.start    = orig_R3;
                 
             } else if (wheel_pid == 0xc294) {
-                // MODO DRIVING FORCE (Se usa solo durante el arranque hasta que se reinicia)
+                // LECTURA DURANTE EL ARRANQUE ANTES DEL REINICIO
                 df_report_t* df = (df_report_t*) report_;
                 
                 report.wheel    = df->wheel << 6;
