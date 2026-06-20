@@ -56,4 +56,27 @@ typedef struct __attribute__((packed)) {
     uint8_t brake;
 } df_report_t;
 
+// G25 Native HID report (NUEVO)
+typedef struct __attribute__((packed)) {
+    uint16_t wheel;       
+    uint8_t throttle;     
+    uint8_t brake;        
+    uint8_t clutch;       
+    uint32_t hat : 4;
+    uint32_t square : 1;
+    uint32_t cross : 1;
+    uint32_t circle : 1;
+    uint32_t triangle : 1;
+    uint32_t L1 : 1;
+    uint32_t R1 : 1;
+    uint32_t L2 : 1;
+    uint32_t R2 : 1;
+    uint32_t select : 1;
+    uint32_t start : 1;
+    uint32_t L3 : 1;
+    uint32_t R3 : 1;
+    uint8_t shifter; 
+    uint8_t padding[4];
+} g25_report_t;
+
 #endif
