@@ -92,8 +92,7 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        // MEJORA: Enviamos la secuencia de inicialización nativa extendida para Logitech G25/G27
-        // Esto desbloquea los 900 grados, el Force Feedback suave nativo y corrige la calibración del centro.
+        // Mantiene la inicialización extendida que corrige el centrado del volante
         static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
@@ -255,7 +254,17 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
-            // pass everything through to the wheel
+            // MEJORA FILTRO ANTI-DUREZA:
+            // buffer[1] contiene la instrucción de Force Feedback enviada por la consola/juego.
+            // 0x12 activa el muelle de retorno artificial pesado.
+            // 0xf5 sobreescribe el autocentrado activando la dureza por defecto.
+            // Al descartar (return) estas dos órdenes, el volante ignora el modo duro y se mantiene suave.
+            uint8_t cmd = buffer[1];
+            if (cmd == 0x12 || cmd == 0xf5) {
+                return;
+            }
+
+            // Si pasa el filtro, enviamos la física real al volante
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
         }
     }
