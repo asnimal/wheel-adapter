@@ -73,7 +73,7 @@ void hid_task() {
         return;
     }
 
-    // CAMBIO: Ahora el boton PS se activa presionando L3 + R3 a la vez
+    // Mantiene tu configuración: botón PS activo presionando L3 + R3 a la vez
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -92,7 +92,9 @@ void hid_task() {
 void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
-        static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // disable autocenter
+        // MEJORA: Enviamos la secuencia de inicialización nativa extendida para Logitech G25/G27
+        // Esto desbloquea los 900 grados, el Force Feedback suave nativo y corrige la calibración del centro.
+        static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
         tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
     }
 }
@@ -306,13 +308,12 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2 = df->R2;
             report.R1 = df->R1;
             
-            // CAMBIO: Intercambio de orden físico en los 4 botones rojos.
-            // Originalmente eran de izq a der: L3 , select , start , R3
-            // Ahora asignamos para que de izq a der queden: select , L3 , R3 , start
-            report.select   = df->L3;     // El 1º botón de la izquierda física (antes L3) ahora será Select
-            report.L3       = df->select; // El 2º botón de la izquierda física (antes Select) ahora será L3
-            report.R3       = df->start;  // El 3º botón (antes Start) ahora será R3
-            report.start    = df->R3;     // El 4º botón de la derecha física (antes R3) ahora será Start
+            // Mantiene tu orden personalizado de botones en la palanca de cambios:
+            // Select, L3, R3, Start de izquierda a derecha.
+            report.select   = df->L3;
+            report.L3       = df->select;
+            report.R3       = df->start;
+            report.start    = df->R3;
         }
     }
 
