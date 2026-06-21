@@ -20,7 +20,7 @@ uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
-uint16_t wheel_pid = 0; // Guardamos el PID actual para saber en qué modo está el volante
+uint16_t wheel_pid = 0; 
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 bool busy = false;
@@ -64,7 +64,7 @@ void report_init() {
     report.wheel = 0x8000;
     report.throttle = 0;
     report.brake = 0;
-    report.clutch = 0; // Cambiado a 0 por defecto para evitar el bloqueo al 100% anterior
+    report.clutch = 0; 
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -90,12 +90,11 @@ void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
         if (wheel_pid == 0xc294) {
-            // PASO 1: El G25 ha conectado en modo básico. Le ordenamos mutar a modo nativo G25.
-            // Tras esto, el volante se desconectará del USB automáticamente.
+            printf("\n[LOG] Enviando comando de mutacion 0xF8 al volante (PID: 0xc294)...\n");
             static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
-        } else if (wheel_pid == 0xc299) {
-            // PASO 2: El G25 ha vuelto a conectar en modo nativo. Apagamos el muelle duro artificial de fábrica.
+        } else {
+            printf("\n[LOG] Volante detectado en PID nativo: %04x. Desactivando muelle artificial (0xF5)...\n", wheel_pid);
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
         }
@@ -139,6 +138,10 @@ int main() {
     tusb_init();
     stdio_init_all();
 
+    printf("\n==================================================\n");
+    printf("   ADAPTER LOG MODE - ESPERANDO DISPOSITIVOS      \n");
+    printf("==================================================\n");
+
     while (1) {
         tuh_task();
         tud_task();
@@ -154,9 +157,7 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if (dev_addr == auth_device) {
         busy = false;
         switch (report_id) {
-            case 0xF3:
-                state = SENDING_NONCE;
-                break;
+            case 0xF3: state = SENDING_NONCE; break;
             case 0xF2:
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
@@ -188,14 +189,8 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
     switch (report_id) {
-        case 0x03:
-            memcpy(buffer, output_0x03, reqlen);
-            board_led_write(false);
-            return reqlen;
-        case 0xF3:
-            memcpy(buffer, output_0xf3, reqlen);
-            signature_ready = false;
-            return reqlen;
+        case 0x03: memcpy(buffer, output_0x03, reqlen); board_led_write(false); return reqlen;
+        case 0xF3: memcpy(buffer, output_0xf3, reqlen); signature_ready = false; return reqlen;
         case 0xF1: {  
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
@@ -225,9 +220,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        if (part > 4) {
-            return;
-        }
+        if (part > 4) return;
         expected_part = part + 1;
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
@@ -243,30 +236,34 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
-    uint16_t vid;
-    uint16_t pid;
+    uint16_t vid, pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    // SECUENCIA CORREGIDA: Capturamos tanto el modo de inicio (0xc294) como el modo nativo tras mutar (0xc299)
-    if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
+    printf("\n[CONEXION] Dispositivo conectado -> VID: %04x, PID: %04x (addr: %d)\n", vid, pid, dev_addr);
+
+    if (vid == 0x046d) {  // Es un dispositivo Logitech
         wheel_device = dev_addr;
         wheel_instance = instance;
         wheel_pid = pid;
         initialized = false;
+        printf("[VOLANTE] Identificado como VOLANTE de Logitech. Guardando PID: %04x\n", pid);
         tuh_hid_receive_report(dev_addr, instance);
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
+        printf("[AUTH] Identificado mando de autenticacion PS5.\n");
     }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if (dev_addr == wheel_device) {
+        printf("\n[DESCONEXION] El volante (PID: %04x) se ha desconectado.\n", wheel_pid);
         wheel_device = 0;
         wheel_instance = 0;
         wheel_pid = 0;
     }
     if (dev_addr == auth_device) {
+        printf("\n[DESCONEXION] El mando de autenticacion se ha desconectado.\n");
         auth_device = 0;
         auth_instance = 0;
     }
@@ -275,22 +272,29 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
         
+        // TELEMETRIA CRÍTICA: Imprime el reporte USB bruto del volante cada vez que cambia algo
+        static uint8_t prev_raw[64] = {0};
+        if (memcmp(prev_raw, report_, len < 64 ? len : 64) != 0) {
+            printf("[DATA PID:%04X len:%d] ", wheel_pid, len);
+            for (uint16_t i = 0; i < len; i++) {
+                printf("%02X ", report_[i]);
+            }
+            printf("\n");
+            memcpy(prev_raw, report_, len < 64 ? len : 64);
+        }
+
+        // Mapeo básico para que no rompa la ejecución de la consola
         if (wheel_pid == 0xc299) {
-            // PROCESAMIENTO MODO NATIVO G25 (Con soporte real de embrague y suavidad)
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2; 
-
-            // Los pedales nativos reportan 0xff en reposo y 0x00 pisados a fondo
             report.throttle = (255 - report_[2]) << 8;
             report.brake    = (255 - report_[3]) << 8;
-            report.clutch   = (255 - report_[4]) << 8; // ¡Aquí se lee el embrague físico real!
-
+            report.clutch   = (255 - report_[4]) << 8; 
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
             report.cross    = (report_[5] & 0x20) ? 1 : 0;
             report.circle   = (report_[5] & 0x40) ? 1 : 0;
             report.triangle = (report_[5] & 0x80) ? 1 : 0;
-
             report.L1       = (report_[6] & 0x01) ? 1 : 0;
             report.R1       = (report_[6] & 0x02) ? 1 : 0;
             report.L2       = (report_[6] & 0x04) ? 1 : 0;
@@ -299,9 +303,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start    = (report_[6] & 0x20) ? 1 : 0;
             report.L3       = (report_[6] & 0x40) ? 1 : 0;
             report.R3       = (report_[6] & 0x80) ? 1 : 0;
-
-        } else if (wheel_pid == 0xc294) {
-            // MAPEO MODO INICIAL TEMPORAL (Solo activo un instante antes de mutar)
+        } else {
             df_report_t* df = (df_report_t*) report_;
             report.wheel    = df->wheel << 6;
             report.throttle = df->throttle << 8;
@@ -322,8 +324,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L3       = df->L3;
         }
 
-        // CONTROL UNIFICADO DEL BOTÓN PS (Integrado directamente en el flujo del reporte)
-        // L3 + R3 corresponden físicamente a los dos botones rojos centrales de la palanca del G25
         if (report.L3 && report.R3) {
             report.PS = 1;
         } else if (report.select && report.start) {
