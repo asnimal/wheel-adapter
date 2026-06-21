@@ -74,7 +74,7 @@ void hid_task() {
         return;
     }
 
-    // Botón PS combinando L3 + R3 (Mapeo directo intacto)
+    // Combinación física real para el botón PS (L3 + R3)
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -99,22 +99,19 @@ void wheel_init_task() {
             if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
                 
-                // COMANDO EXACTO PARA G25 NATIVO (Basado en el driver oficial hid-lg4ff.c)
+                // Comando único y estricto hacia modo nativo G25
                 static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
                 printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10)...\n");
-                
-                // Enviamos SOLO este comando para evitar que mute a C298 por error
                 tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
             }
         } 
         else if (wheel_pid == 0xc299 && !initialized) {
             initialized = true;
             printf("\n========================================================\n");
-            printf(" [OK] ¡OBJETIVO CONSEGUIDO! MUTACIÓN A G25 NATIVO (C299)\n");
+            printf(" [OK] ¡VOLANTE EN MODO NATIVO G25 (C299) CONFIGURADO!\n");
             printf("========================================================\n\n");
             
-            // Relajar el motor
+            // Suavizar motores tras la calibración inicial
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
@@ -160,7 +157,7 @@ int main() {
     stdio_init_all();
 
     printf("\n==================================================\n");
-    printf("   SNIFFER GLOBAL USB ACTIVADO - OBJETIVO C299    \n");
+    printf("        SISTEMA DE TRADUCCIÓN G25 NATIVO (C299)     \n");
     printf("==================================================\n");
 
     while (1) {
@@ -274,14 +271,13 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("\n[CONEXIÓN] USB Host -> VID:%04X PID:%04X\n", vid, pid);
 
-    // Protegemos el auth aceptando nativamente el C299
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance; 
         wheel_pid = pid;
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
-        printf("[WHEEL] Volante asignado.\n");
+        printf("[WHEEL] Volante G25 asignado.\n");
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
@@ -303,14 +299,17 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
+    static uint32_t last_print_time = 0;
+    uint32_t now = board_millis();
+
     if (len > 0 && dev_addr == wheel_device) {
         
-        static uint8_t prev_raw[64] = {0};
-        if (memcmp(prev_raw, report_, len < 64 ? len : 64) != 0) {
-            printf("[WHEEL DATA] PID:%04X -> ", wheel_pid);
+        // LIMITADOR DE LOG: Evita que el timestamp inunde Putty (Imprime cada 300ms)
+        if (now - last_print_time >= 300) {
+            printf("[DATA C299] ");
             for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
             printf("\n");
-            memcpy(prev_raw, report_, len < 64 ? len : 64);
+            last_print_time = now;
         }
 
         if (wheel_pid == 0xc294) {
@@ -328,38 +327,56 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L1 = df->L1;
             report.R2 = df->R2;
             report.R1 = df->R1;
-            
-            // Asignación de botones de consola (intercambio para comodidad)
             report.select   = df->L3;     
             report.L3       = df->select; 
             report.R3       = df->start;  
             report.start    = df->R3;     
         } 
         else if (wheel_pid == 0xc299) {
-            uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
-            report.wheel = raw_wheel << 2;
+            // =================================================================
+            // DETECCIÓN CORRECTA Y LIMPIA DEL MAPA DE MEMORIA NATIVO G25 (C299)
+            // =================================================================
+
+            // 1. EJE DE DIRECCIÓN
+            // En C299, la posicion real progresiva se encuentra en los bytes 3 y 4.
+            // Centrado perfecto es 0x8000. Lo pasamos directo al reporte de salida.
+            uint16_t raw_steering = report_[3] | (report_[4] << 8);
+            report.wheel = raw_steering;
+
+            // 2. PEDALES DE CARRERA (Invertidos por hardware: 0xFF en reposo, 0x00 pisado)
+            // Byte 5 = Acelerador | Byte 6 = Freno
+            // Los invertimos restando a 0xFF y los escalamos a los 16 bits (<< 8) del G29
+            report.throttle = (0xFF - report_[5]) << 8;
+            report.brake    = (0xFF - report_[6]) << 8;
             
-            // Pedales G25 Nativo
-            report.throttle = report_[2] << 8;
-            report.brake    = report_[3] << 8;
-            report.clutch   = report_[4] << 8; 
+            // El Embrague se ubica en el Byte 7 compartiendo espacio con la base del clock.
+            // Para evitar oscilaciones parásitas, filtramos el ruido en reposo.
+            if (report_[7] >= 0xF5) {
+                report.clutch = 0x0000; // Totalmente suelto
+            } else {
+                report.clutch = (0xFF - report_[7]) << 8; // Escalado progresivo de pisada
+            }
 
-            // Botones G25 Nativo
-            report.dpad     = report_[5] & 0x0F;
-            report.square   = (report_[5] & 0x10) ? 1 : 0;
-            report.cross    = (report_[5] & 0x20) ? 1 : 0;
-            report.circle   = (report_[5] & 0x40) ? 1 : 0;
-            report.triangle = (report_[5] & 0x80) ? 1 : 0;
+            // 3. CRUCETA (D-PAD)
+            // Filtrado de seguridad sobre los 4 bits inferiores del Byte 0
+            uint8_t hat = report_[0] & 0x0F;
+            report.dpad = (hat <= 7) ? hat : 0x08;
 
-            report.R1       = (report_[6] & 0x01) ? 1 : 0;
-            report.L1       = (report_[6] & 0x02) ? 1 : 0;
-            report.R2       = (report_[6] & 0x04) ? 1 : 0;
-            report.L2       = (report_[6] & 0x08) ? 1 : 0;
+            // 4. BOTONES DEL ARO Y PALANCA (Mapeo desde ceros lógicos, evita pulsaciones fantasma)
+            report.square   = (report_[0] & 0x10) ? 1 : 0;
+            report.cross    = (report_[0] & 0x20) ? 1 : 0;
+            report.circle   = (report_[0] & 0x40) ? 1 : 0;
+            report.triangle = (report_[0] & 0x80) ? 1 : 0;
 
-            report.select   = (report_[6] & 0x10) ? 1 : 0;
-            report.L3       = (report_[6] & 0x20) ? 1 : 0;
-            report.R3       = (report_[6] & 0x40) ? 1 : 0;
-            report.start    = (report_[6] & 0x80) ? 1 : 0;
+            report.L1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda
+            report.R1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha
+            report.L2       = (report_[1] & 0x04) ? 1 : 0;
+            report.R2       = (report_[1] & 0x08) ? 1 : 0;
+
+            report.select   = (report_[1] & 0x10) ? 1 : 0;
+            report.start    = (report_[1] & 0x20) ? 1 : 0;
+            report.L3       = (report_[1] & 0x40) ? 1 : 0; // Botón físico asignado
+            report.R3       = (report_[1] & 0x80) ? 1 : 0; // Botón físico asignado
         }
     }
 
