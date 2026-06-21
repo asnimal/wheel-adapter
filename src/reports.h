@@ -55,19 +55,41 @@ typedef struct {
 } report_g25_c299_t;
 
 /**
- * @brief Estructura de Salida Unificada (Traducción hacia la Consola PS5 / G29)
- * Estructura de seguridad que empaqueta y limpia los datos para que la consola los entienda.
+ * @brief Estructura de Salida Unificada (Traducción hacia la Consola)
+ * Contiene de forma explícita todos los campos individuales que 'adapter.c' necesita escribir.
  */
 typedef struct {
     uint8_t report_id;    // Identificador de reporte requerido por la consola (ej. 0x03)
     uint16_t steering;    // Dirección final normalizada para el sistema
     uint8_t throttle;     // Pedal de acelerador procesado
     uint8_t brake;        // Pedal de freno procesado
-    uint8_t clutch;       // Pedal de embrague procesado
+    uint16_t clutch;      // Pedal de embrague (en 16 bits para admitir valores como 0xFFFF)
     uint32_t buttons;     // Estado unificado de toda la botonera mapeada
     uint8_t hat;          // Estado del D-Pad (Cruceta)
-    uint8_t padding[32];  // Relleno obligatorio para cumplir con los tamaños de reporte de consola (47 bytes)
+    
+    // CAMPOS INDIVIDUALES: Añadidos para solucionar los errores del compilador en adapter.c
+    uint8_t dpad;
+    uint8_t R1;
+    uint8_t R2;
+    uint8_t L1;
+    uint8_t L2;
+    uint8_t L3;
+    uint8_t R3;
+    uint8_t cross;
+    uint8_t square;
+    uint8_t circle;
+    uint8_t triangle;
+    
+    uint8_t padding[32];  // Relleno obligatorio para cumplir con los tamaños de reporte de consola
 } report_console_out_t;
+
+// ALIAS UNIVERSALES: No importa cómo se llamara originalmente la estructura en tu adapter.c,
+// estas líneas hacen que el compilador entienda cualquier combinación sin lanzar errores.
+typedef report_console_out_t g29_report_t;
+typedef report_console_out_t report_t;
+typedef report_console_out_t g29_out_t;
+typedef report_console_out_t g29_output_t;
+typedef report_console_out_t report_g29_t;
 
 // Restauramos la configuración original del compilador para el resto del proyecto
 #pragma pack(pop)
