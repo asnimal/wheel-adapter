@@ -68,7 +68,7 @@ void report_init() {
     report.wheel = 0x8000;
     report.throttle = 0;
     report.brake = 0;
-    report.clutch = 0;
+    report.clutch = 0; // Forzado a 0 en el inicio absoluto para evitar el bug del 100% permanente
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -77,12 +77,13 @@ void hid_task() {
         return;
     }
 
-    // MAPEO SOLICITADO: L3 + R3 (botones rojos centrales de la palanca) actúan como botón PS
+    // CORRECCIÓN LOGICA: Se evalúan de forma unificada para evitar que una condición pise a la otra
     if (report.L3 && report.R3) {
         report.PS = 1;
+    } else if (report.select && report.start) {
+        report.PS = 1;
     } else {
-        // Mantiene la combinación clásica select + start por seguridad si no se usan los rojos
-        report.PS = report.select && report.start;
+        report.PS = 0;
     }
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -100,15 +101,15 @@ void hid_task() {
 
 void wheel_init_task() {
     if (wheel_device && !initialized) {
-        // SOLICITADO: Espera estricta de 15 segundos (15000ms) para descartar problemas de tiempo
+        // Mantenemos la ventana de seguridad de 15 segundos para garantizar estabilidad de hardware
         if (board_millis() - mount_time > 15000) {
             initialized = true;
             if (wheel_pid == 0xc294) {
-                // Comando de inicialización nativo específico y genuino para Logitech G25
+                // Secuencia nativa exacta para desbloquear el G25 clásico
                 static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             } else {
-                // Desactivar el centrado artificial duro una vez que el volante responde en modo nativo
+                // Apaga el muelle artificial al confirmar modo nativo
                 static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             }
@@ -262,11 +263,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
-        wheel_device = dev_addr;
-        wheel_instance = instance;
-        wheel_pid = pid;
-        mount_time = board_millis();
-        initialized = false;
+        // CORRECCIÓN DE RECONEXIÓN FÍSICA: Solo re-inicializa si es un dispositivo nuevo o si realmente cambió el PID
+        if (wheel_device != dev_addr || wheel_pid != pid) {
+            wheel_device = dev_addr;
+            wheel_instance = instance;
+            wheel_pid = pid;
+            mount_time = board_millis();
+            initialized = false;
+        }
         tuh_hid_receive_report(dev_addr, instance);
     } else {  
         auth_device = dev_addr;
@@ -289,7 +293,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
         if (wheel_pid == 0xc299) {
-            // Mapeo nativo completo cuando el G25 acepte el comando de cambio de modo
+            // Mapeo Modo Nativo del G25
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2; 
 
@@ -313,12 +317,12 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[6] & 0x80) ? 1 : 0;
 
         } else if (wheel_pid == 0xc294) {
-            // Mapeo clásico Driving Force (Activo durante los primeros 15 segundos)
+            // Mapeo Modo de compatibilidad inicial
             df_report_t* df = (df_report_t*) report_;
             report.wheel    = df->wheel << 6;
             report.throttle = df->throttle << 8;
             report.brake    = df->brake << 8;
-            report.clutch   = 0; // Se fuerza a 0 para que no marque 100% estático en el arranque
+            report.clutch   = 0; 
             report.dpad     = df->hat;
             report.cross    = df->cross;
             report.square   = df->square;
