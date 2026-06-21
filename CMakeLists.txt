@@ -28,3 +28,7 @@ target_link_libraries(adapter
     tinyusb_pico_pio_usb
 )
 pico_add_extra_outputs(adapter)
+
+# FORZAR SALIDA DE LOGS POR PINES FISICOS (UART)
+pico_enable_stdio_uart(adapter 1)
+pico_enable_stdio_usb(adapter 0)
