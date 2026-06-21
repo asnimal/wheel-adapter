@@ -21,7 +21,7 @@ uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
 uint8_t wheel_instance = 0;
-uint16_t wheel_pid = 0;       // Guarda dinámicamente si el volante está en C294 o C299
+uint16_t wheel_pid = 0;       
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
@@ -74,7 +74,7 @@ void hid_task() {
         return;
     }
 
-    // Conservado cambio solicitado: Botón PS se activa con L3 + R3
+    // CAMBIO: Ahora el boton PS se activa presionando L3 + R3 a la vez
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -96,21 +96,35 @@ void wheel_init_task() {
 
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
-            // El volante está en modo compatibilidad. Le insistimos con el comando nativo real de G25 cada 2 segundos.
             if (current_time - last_send_time >= 2000) {
                 last_send_time = current_time;
-                printf("\n[LOG G25] Volante en C294. Enviando comando oficial Linux LG4FF de mutacion (0xF8 0x09 0x02...)\n");
-                static uint8_t g25_native_cmd[] = { 0xf8, 0x09, 0x02, 0x00, 0x00, 0x00, 0x00 };
-                tuh_hid_send_report(wheel_device, wheel_instance, 0, g25_native_cmd, sizeof(g25_native_cmd));
+                printf("\n[LOG G25] Volante en C294. Inyectando rafaga de mutacion multidireccional (Control Transfer + EP OUT)...\n");
+
+                // Definición de las 3 variantes de comandos de mutación de Logitech
+                static uint8_t cmd_g25_native[] = { 0xf8, 0x09, 0x02, 0x01, 0x00, 0x00, 0x00 }; // Comando Linux Nativo Real (Bit 4 en 0x01)
+                static uint8_t cmd_unlock_alt[] = { 0xf8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 }; // Comando alternativo de desbloqueo de hardware
+                static uint8_t cmd_universal_g[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 }; // Alternancia universal forzada
+
+                // Canal 1: Enviar como Control Transfer SET_REPORT (Tipo OUTPUT) -> El método más probable de aceptación
+                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
+                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_unlock_alt, sizeof(cmd_unlock_alt));
+                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_universal_g, sizeof(cmd_universal_g));
+
+                // Canal 2: Enviar como Control Transfer SET_REPORT (Tipo FEATURE)
+                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_FEATURE, cmd_g25_native, sizeof(cmd_g25_native));
+
+                // Canal 3: Enviar mediante Endpoint Interrupt OUT directo (Por si acaso)
+                tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_native, sizeof(cmd_g25_native));
             }
         } 
         else if (wheel_pid == 0xc299 && !initialized) {
-            // ¡El volante ha cambiado con éxito a modo nativo real! Libera el muelle duro.
+            // El volante ha conmutado su procesador interno a modo G25 Nativo
             initialized = true;
-            printf("\n[LOG G25] ¡MUTACIÓN EXITOSA CONFIRMADA! Volante en modo nativo G25 (C299).\n");
-            printf("[LOG G25] Enviando comando 0xF5 para liberar muelle de centrado...\n");
-            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  // disable autocenter
+            printf("\n[LOG G25] ¡MUTACIÓN EXITOSA CONFIRMADA! Detectado PID Nativo G25 (C299).\n");
+            printf("[LOG G25] Desactivando muelle de centrado motorizado...\n");
+            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+            tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
         }
     }
 }
@@ -221,7 +235,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
-        case 0xF1: {  // GET_SIGNATURE_NONCE
+        case 0xF1: {  
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
@@ -238,7 +252,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             }
             return reqlen;
         }
-        case 0xF2: {  // GET_SIGNING_STATE
+        case 0xF2: {  
             printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
@@ -250,7 +264,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 }
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
-    if (report_id == 0xF0) {  // SET_AUTH_PAYLOAD
+    if (report_id == 0xF0) {  
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
@@ -286,7 +300,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("\ntuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
 
-    // CORRECCIÓN CRÍTICA: Admitir tanto el PID original de compatibilidad C294 como el PID nativo mutado C299
+    // Permite gestionar el dispositivo si es C294 (Compatibilidad) o C299 (G25 Nativo)
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
@@ -315,7 +329,6 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
         
-        // Logger activo por UART: Muestra los bytes crudos cuando hay movimiento físico
         static uint8_t prev_raw[64] = {0};
         if (memcmp(prev_raw, report_, len < 64 ? len : 64) != 0) {
             printf("[DATA PID:%04X len:%d] ", wheel_pid, len);
@@ -325,7 +338,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         }
 
         if (wheel_pid == 0xc294) {
-            // MAPEO MODO COMPATIBILIDAD (Tu lógica original intacta)
+            // MAPEO MODO COMPATIBILIDAD
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
@@ -340,19 +353,19 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2 = df->R2;
             report.R1 = df->R1;
             
-            // Conservado cambio solicitado: Intercambio físico personalizado de los 4 botones rojos
+            // Reasignación física de los botones rojos de la palanca: select , L3 , R3 , start
             report.select   = df->L3;     
             report.L3       = df->select; 
             report.R3       = df->start;  
             report.start    = df->R3;     
         } 
         else if (wheel_pid == 0xc299) {
-            // MAPEO MODO NATIVO REAL DEL G25 (Para cuando la mutación surta efecto)
+            // MAPEO MODO NATIVO G25 REAL (Activación de palanca en H y pedal de embrague)
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2;
             report.throttle = report_[2] << 8;
             report.brake    = report_[3] << 8;
-            report.clutch   = report_[4] << 8; // ¡Aquí ya se lee el embrague físico!
+            report.clutch   = report_[4] << 8; 
 
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
@@ -365,7 +378,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2       = (report_[6] & 0x04) ? 1 : 0;
             report.L2       = (report_[6] & 0x08) ? 1 : 0;
 
-            // Se replica tu orden físico preferido en los botones de la botonera de cambios en modo nativo
+            // Conservar el orden preferido en los botones de la botonera en modo nativo
             report.select   = (report_[6] & 0x10) ? 1 : 0;
             report.L3       = (report_[6] & 0x20) ? 1 : 0;
             report.R3       = (report_[6] & 0x40) ? 1 : 0;
