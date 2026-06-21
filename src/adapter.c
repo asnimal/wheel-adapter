@@ -90,11 +90,13 @@ void wheel_init_task() {
     if (wheel_device && !initialized) {
         initialized = true;
         if (wheel_pid == 0xc294) {
-            printf("\n[LOG] Enviando comando de mutacion 0xF8 al volante (PID: 0xc294)...\n");
-            static uint8_t buf[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
-        } else {
-            printf("\n[LOG] Volante detectado en PID nativo: %04x. Desactivando muelle artificial (0xF5)...\n", wheel_pid);
+            // COMANDO ESPECÍFICO DE MUTACIÓN NATIVA PARA LOGITECH G25 / G27
+            // Enviamos la secuencia de inicialización clásica de Logitech para desbloquear las funciones ocultas (Modo Nativo 0xc299)
+            printf("\n[LOG G25] Enviando comando de desbloqueo nativo G25 al USB...\n");
+            static uint8_t g25_init_string[] = { 0xf8, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00 };
+            tuh_hid_send_report(wheel_device, wheel_instance, 0, g25_init_string, sizeof(g25_init_string));
+        } else if (wheel_pid == 0xc299) {
+            printf("\n[LOG G25] ¡MUTACIÓN EXITOSA! Volante en modo nativo 0xc299. Forzando desact. muelle (0xF5)...\n");
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
         }
@@ -104,8 +106,7 @@ void wheel_init_task() {
 void auth_task() {
     if (!busy && auth_device) {
         switch (state) {
-            case IDLE:
-                break;
+            case IDLE: break;
             case SENDING_RESET:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
@@ -139,7 +140,7 @@ int main() {
     stdio_init_all();
 
     printf("\n==================================================\n");
-    printf("   ADAPTER LOG MODE - ESPERANDO DISPOSITIVOS      \n");
+    printf("   ADAPTER LOG MODE - EXPERIMENTANDO CON G25      \n");
     printf("==================================================\n");
 
     while (1) {
@@ -239,31 +240,27 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t vid, pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    printf("\n[CONEXION] Dispositivo conectado -> VID: %04x, PID: %04x (addr: %d)\n", vid, pid, dev_addr);
+    printf("\n[CONEXION] VID: %04x, PID: %04x\n", vid, pid);
 
-    if (vid == 0x046d) {  // Es un dispositivo Logitech
+    if (vid == 0x046d) {  
         wheel_device = dev_addr;
         wheel_instance = instance;
         wheel_pid = pid;
         initialized = false;
-        printf("[VOLANTE] Identificado como VOLANTE de Logitech. Guardando PID: %04x\n", pid);
         tuh_hid_receive_report(dev_addr, instance);
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
-        printf("[AUTH] Identificado mando de autenticacion PS5.\n");
     }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if (dev_addr == wheel_device) {
-        printf("\n[DESCONEXION] El volante (PID: %04x) se ha desconectado.\n", wheel_pid);
         wheel_device = 0;
         wheel_instance = 0;
         wheel_pid = 0;
     }
     if (dev_addr == auth_device) {
-        printf("\n[DESCONEXION] El mando de autenticacion se ha desconectado.\n");
         auth_device = 0;
         auth_instance = 0;
     }
@@ -272,28 +269,28 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
         
-        // TELEMETRIA CRÍTICA: Imprime el reporte USB bruto del volante cada vez que cambia algo
+        // Mantener telemetría activa para comprobar si logramos cambiar de PID
         static uint8_t prev_raw[64] = {0};
         if (memcmp(prev_raw, report_, len < 64 ? len : 64) != 0) {
             printf("[DATA PID:%04X len:%d] ", wheel_pid, len);
-            for (uint16_t i = 0; i < len; i++) {
-                printf("%02X ", report_[i]);
-            }
+            for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
             printf("\n");
             memcpy(prev_raw, report_, len < 64 ? len : 64);
         }
 
-        // Mapeo básico para que no rompa la ejecución de la consola
         if (wheel_pid == 0xc299) {
+            // PROCESAMIENTO NATIVO G25 REAL
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2; 
             report.throttle = (255 - report_[2]) << 8;
             report.brake    = (255 - report_[3]) << 8;
-            report.clutch   = (255 - report_[4]) << 8; 
+            report.clutch   = (255 - report_[4]) << 8; // Activado el tercer pedal real
+            
+            // Botones nativos y caja de cambios en H
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
             report.cross    = (report_[5] & 0x20) ? 1 : 0;
-            report.circle   = (report_[5] & 0x40) ? 1 : 0;
+            report.circle   = (report_[6] & 0x40) ? 1 : 0; 
             report.triangle = (report_[5] & 0x80) ? 1 : 0;
             report.L1       = (report_[6] & 0x01) ? 1 : 0;
             report.R1       = (report_[6] & 0x02) ? 1 : 0;
@@ -301,9 +298,10 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2       = (report_[6] & 0x08) ? 1 : 0;
             report.select   = (report_[6] & 0x10) ? 1 : 0;
             report.start    = (report_[6] & 0x20) ? 1 : 0;
-            report.L3       = (report_[6] & 0x40) ? 1 : 0;
+            report.L3       = (report_[5] & 0x40) ? 1 : 0; 
             report.R3       = (report_[6] & 0x80) ? 1 : 0;
         } else {
+            // MAPEO MODO COMPATIBILIDAD PROVISIONAL
             df_report_t* df = (df_report_t*) report_;
             report.wheel    = df->wheel << 6;
             report.throttle = df->throttle << 8;
@@ -324,6 +322,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.L3       = df->L3;
         }
 
+        // Asignación botón PS
         if (report.L3 && report.R3) {
             report.PS = 1;
         } else if (report.select && report.start) {
