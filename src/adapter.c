@@ -74,7 +74,7 @@ void hid_task() {
         return;
     }
 
-    // Botón PS combinando L3 + R3
+    // El botón PS físico real solo se activa si L3 y R3 son presionados de verdad por el usuario
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -97,22 +97,23 @@ void wheel_init_task() {
 
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
-            if (current_time - last_send_time >= 1500) {
+            if (current_time - last_send_time >= 2000) {
                 last_send_time = current_time;
                 
-                static uint8_t cmd_g25_native[] = { 0xf8, 0x09, 0x02, 0x01, 0x00, 0x00, 0x00 };
-                static uint8_t cmd_unlock_alt[] = { 0xf8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                static uint8_t cmd_universal_g[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                // CORRECCIÓN CRÍTICA: Cambiado el tercer byte de 0x02 a 0x00 para forzar Modo Nativo G25 (C299)
+                static uint8_t cmd_g25_true_native[] = { 0xf8, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00 };
+                static uint8_t cmd_unlock_alt[]     = { 0xf8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                static uint8_t cmd_universal_g[]    = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
                 printf("[WHEEL] Estado C294 -> Ejecutando inyeccion tecnica %d...\n", mutation_step);
 
                 switch (mutation_step) {
                     case 0:
-                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
+                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_true_native, sizeof(cmd_g25_true_native));
                         mutation_step = 1;
                         break;
                     case 1:
-                        tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_native, sizeof(cmd_g25_native));
+                        tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_true_native, sizeof(cmd_g25_true_native));
                         mutation_step = 2;
                         break;
                     case 2:
@@ -126,7 +127,6 @@ void wheel_init_task() {
                 }
             }
         } 
-        // Aceptamos de forma nativa tanto C298 como C299 tras la mutación exitosa
         else if ((wheel_pid == 0xc298 || wheel_pid == 0xc299) && !initialized) {
             initialized = true;
             printf("\n========================================================\n");
@@ -303,14 +303,13 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     printf("\n[CONEXIÓN] Dispositivo montado en puerto USB Host -> VID:%04X PID:%04X (addr: %d, inst: %d)\n", vid, pid, dev_addr, instance);
 
-    // Corregido: Ahora C298 entra legítimamente como volante y no rompe la lógica de seguridad
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc298) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance; 
         wheel_pid = pid;
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
-        printf("[WHEEL] Volante asignado correctamente. Deteniendo posible usurpacion de Auth.\n");
+        printf("[WHEEL] Volante asignado correctamente.\n");
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
@@ -342,11 +341,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             memcpy(prev_raw, report_, len < 64 ? len : 64);
         }
 
+        // MODO 1: Volante sin inicializar (Driving Force Pro Mode)
         if (wheel_pid == 0xc294) {
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
             report.throttle = df->throttle << 8;
             report.brake = df->brake << 8;
+            report.clutch = 0xFFFF;
             report.dpad = df->hat;
             report.cross = df->cross;
             report.square = df->square;
@@ -362,14 +363,43 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = df->start;  
             report.start    = df->R3;     
         } 
-        // Agregado mapeo para soportar la lectura de datos tanto en modo C298 como C299
-        else if (wheel_pid == 0xc298 || wheel_pid == 0xc299) {
+        // MODO 2: Si el volante cae por error en protocolo de Driving Force GT
+        else if (wheel_pid == 0xc298) {
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2;
+            
+            // En el protocolo C298, los pedales están al final (Bytes 5 y 6)
+            report.throttle = report_[5] << 8;
+            report.brake    = report_[6] << 8;
+            report.clutch   = 0xFFFF; // No tiene embrague en este modo
+
+            // En el protocolo C298, los botones están al principio (Bytes 2, 3 y 4)
+            report.dpad     = report_[2] & 0x0F;
+            report.cross    = (report_[2] & 0x10) ? 1 : 0;
+            report.square   = (report_[2] & 0x20) ? 1 : 0;
+            report.circle   = (report_[2] & 0x40) ? 1 : 0;
+            report.triangle = (report_[2] & 0x80) ? 1 : 0;
+
+            report.R1       = (report_[3] & 0x01) ? 1 : 0;
+            report.L1       = (report_[3] & 0x02) ? 1 : 0;
+            report.R2       = (report_[3] & 0x04) ? 1 : 0;
+            report.L2       = (report_[3] & 0x08) ? 1 : 0;
+            report.select   = (report_[3] & 0x10) ? 1 : 0;
+            report.start    = (report_[3] & 0x20) ? 1 : 0;
+            report.R3       = (report_[3] & 0x40) ? 1 : 0;
+            report.L3       = (report_[3] & 0x80) ? 1 : 0;
+        }
+        // MODO 3: PROTOCOLO NATIVO ABSOLUTO G25 (El objetivo real)
+        else if (wheel_pid == 0xc299) {
+            uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
+            report.wheel = raw_wheel << 2;
+            
+            // En el protocolo G25 Nativo, los pedales ocupan los bytes 2, 3 y 4 legítimamente
             report.throttle = report_[2] << 8;
             report.brake    = report_[3] << 8;
             report.clutch   = report_[4] << 8; 
 
+            // Los botones ocupan los bytes 5 y 6
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
             report.cross    = (report_[5] & 0x20) ? 1 : 0;
