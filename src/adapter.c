@@ -20,7 +20,7 @@ uint8_t nonce_ready = 0;
 uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
-uint8_t wheel_instance = 0; // Almacenará dinámicamente la instancia correcta (ej. 1)
+uint8_t wheel_instance = 0; 
 uint16_t wheel_pid = 0;       
 uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
@@ -74,7 +74,7 @@ void hid_task() {
         return;
     }
 
-    // Mantenemos tu remapeo: Botón PS se activa presionando L3 + R3 a la vez
+    // Remapeo físico intacto: L3 + R3 activa el botón PS
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -84,7 +84,6 @@ void hid_task() {
 
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
         if (wheel_device) {
-            // Se envía a la instancia correcta del volante
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
         }
         memcpy(prev_ff_buf, ff_buf, sizeof(ff_buf));
@@ -93,33 +92,53 @@ void hid_task() {
 
 void wheel_init_task() {
     static uint32_t last_send_time = 0;
+    static uint8_t mutation_step = 0; // Alternador de estrategia de envío
     uint32_t current_time = board_millis();
 
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
-            if (current_time - last_send_time >= 2000) {
+            // Enviamos un único método limpio cada 1500ms para evitar saturar el Endpoint de Control
+            if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
-                printf("\n[LOG G25] Volante en C294 (Instancia %d). Enviando rafaga a canal correcto...\n", wheel_instance);
-
-                // Comandos Logitech estructurados limpiamente sin bytes basura
+                
                 static uint8_t cmd_g25_native[] = { 0xf8, 0x09, 0x02, 0x01, 0x00, 0x00, 0x00 };
                 static uint8_t cmd_unlock_alt[] = { 0xf8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 static uint8_t cmd_universal_g[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
-                // Transmitir explícitamente usando la variable wheel_instance asignada dinámicamente
-                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
-                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_unlock_alt, sizeof(cmd_unlock_alt));
-                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_universal_g, sizeof(cmd_universal_g));
+                printf("[LOG G25] Volante C294 (Inst:%d) -> Intentando Metodo de Inyeccion %d...\n", wheel_instance, mutation_step);
 
-                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_FEATURE, cmd_g25_native, sizeof(cmd_g25_native));
-
-                tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_native, sizeof(cmd_g25_native));
+                switch (mutation_step) {
+                    case 0:
+                        // Estrategia 1: Comando nativo real mediante Control Transfer (SET_REPORT OUTPUT)
+                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
+                        mutation_step = 1;
+                        break;
+                    case 1:
+                        // Estrategia 2: Comando nativo real mediante canal Interrupt OUT (No toca EP0)
+                        tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_native, sizeof(cmd_g25_native));
+                        mutation_step = 2;
+                        break;
+                    case 2:
+                        // Estrategia 3: Comando alternativo de desbloqueo mediante Control Transfer
+                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_unlock_alt, sizeof(cmd_unlock_alt));
+                        mutation_step = 3;
+                        break;
+                    case 3:
+                        // Estrategia 4: Barrido universal extendido mediante Control Transfer
+                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_universal_g, sizeof(cmd_universal_g));
+                        mutation_step = 0; // Reiniciar bucle de intentos
+                        break;
+                }
             }
         } 
         else if (wheel_pid == 0xc299 && !initialized) {
             initialized = true;
-            printf("\n[LOG G25] ¡MUTACIÓN EXITOSA! Detectado PID Nativo G25 (C299) en instancia %d.\n", wheel_instance);
-            printf("[LOG G25] Desactivando muelle de centrado motorizado nativo...\n");
+            printf("\n==================================================\n");
+            printf(" ¡MUTACIÓN DE HARDWARE CONFIRMADA EN INSTANCIA %d!\n", wheel_instance);
+            printf(" DETECTADO VOLANTE EN MODO NATIVO G25 (PID: C299) \n");
+            printf("==================================================\n\n");
+            
+            // Apagar el muelle de fuerza por defecto
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
@@ -300,7 +319,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 
     if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
-        wheel_instance = instance; // GUARDADO CORRECTO: Almacenará la instancia 1 para el volante
+        wheel_instance = instance; 
         wheel_pid = pid;
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
@@ -349,7 +368,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2 = df->R2;
             report.R1 = df->R1;
             
-            // Reasignación de botones de la palanca manteniendo L3 + R3 libres para el botón PS
             report.select   = df->L3;     
             report.L3       = df->select; 
             report.R3       = df->start;  
