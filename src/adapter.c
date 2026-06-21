@@ -74,7 +74,7 @@ void hid_task() {
         return;
     }
 
-    // El botón PS físico real solo se activa si L3 y R3 son presionados de verdad por el usuario
+    // Botón PS combinando L3 + R3 (Mapeo directo intacto)
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -92,47 +92,29 @@ void hid_task() {
 
 void wheel_init_task() {
     static uint32_t last_send_time = 0;
-    static uint8_t mutation_step = 0;
     uint32_t current_time = board_millis();
 
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
-            if (current_time - last_send_time >= 2000) {
+            if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
                 
-                // CORRECCIÓN CRÍTICA: Cambiado el tercer byte de 0x02 a 0x00 para forzar Modo Nativo G25 (C299)
-                static uint8_t cmd_g25_true_native[] = { 0xf8, 0x09, 0x00, 0x01, 0x00, 0x00, 0x00 };
-                static uint8_t cmd_unlock_alt[]     = { 0xf8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                static uint8_t cmd_universal_g[]    = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                // COMANDO EXACTO PARA G25 NATIVO (Basado en el driver oficial hid-lg4ff.c)
+                static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
-                printf("[WHEEL] Estado C294 -> Ejecutando inyeccion tecnica %d...\n", mutation_step);
-
-                switch (mutation_step) {
-                    case 0:
-                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_true_native, sizeof(cmd_g25_true_native));
-                        mutation_step = 1;
-                        break;
-                    case 1:
-                        tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_true_native, sizeof(cmd_g25_true_native));
-                        mutation_step = 2;
-                        break;
-                    case 2:
-                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_unlock_alt, sizeof(cmd_unlock_alt));
-                        mutation_step = 3;
-                        break;
-                    case 3:
-                        tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_universal_g, sizeof(cmd_universal_g));
-                        mutation_step = 0;
-                        break;
-                }
+                printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10)...\n");
+                
+                // Enviamos SOLO este comando para evitar que mute a C298 por error
+                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
             }
         } 
-        else if ((wheel_pid == 0xc298 || wheel_pid == 0xc299) && !initialized) {
+        else if (wheel_pid == 0xc299 && !initialized) {
             initialized = true;
             printf("\n========================================================\n");
-            printf(" [OK] ¡MUTACIÓN COMPLETADA CON ÉXITO! PID ACTIVO: %04X\n", wheel_pid);
+            printf(" [OK] ¡OBJETIVO CONSEGUIDO! MUTACIÓN A G25 NATIVO (C299)\n");
             printf("========================================================\n\n");
             
+            // Relajar el motor
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
@@ -146,7 +128,6 @@ void auth_task() {
             case IDLE:
                 break;
             case SENDING_RESET:
-                printf("[PICO -> AUTH] Solicitando Reset de Auth (Report 0xF3)\n");
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
                 break;
@@ -156,7 +137,6 @@ void auth_task() {
                 set_buffer[2] = nonce_part;
                 set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                printf("[PICO -> AUTH] Enviando Nonce Parte %d al mando de seguridad\n", nonce_part);
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
                 nonce_part++;
@@ -180,7 +160,7 @@ int main() {
     stdio_init_all();
 
     printf("\n==================================================\n");
-    printf("   SNIFFER GLOBAL USB ACTIVADO - MODO PS5 ADAPTER \n");
+    printf("   SNIFFER GLOBAL USB ACTIVADO - OBJETIVO C299    \n");
     printf("==================================================\n");
 
     while (1) {
@@ -202,7 +182,6 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
-                printf("[AUTH -> PICO] Estado de Firma recibido: %02X (00=Listo)\n", get_buffer[2]);
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
@@ -210,14 +189,13 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 break;
             case 0xF1:
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
-                printf("[AUTH -> PICO] Descargada Firma Parte %d/19\n", signature_part);
                 signature_part++;
                 if (signature_part == 19) {
                     state = IDLE;
                     expected_part = 0;
                     signature_ready = true;
                     signature_part = 0;
-                    printf("[AUTH] ¡Firma criptografica completa almacenada en Pico!\n");
+                    printf("[AUTH] Firma completa descargada.\n");
                 }
                 break;
         }
@@ -228,14 +206,12 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if ((dev_addr == auth_device) && (report_id == 0xF0)) {
         busy = false;
         if (nonce_part == 5) {
-            printf("[PICO] Nonce enviado por completo. Esperando procesamiento del mando...\n");
             state = WAITING_FOR_SIG;
         }
     }
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
-    printf("[PS5 -> PICO] Consola solicita GET_REPORT ID: 0x%02X (Len: %d)\n", report_id, reqlen);
     switch (report_id) {
         case 0x03:
             memcpy(buffer, output_0x03, reqlen);
@@ -250,7 +226,6 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             buffer[1] = signature_part;
             buffer[2] = 0;
             memcpy(&buffer[3], &signature[signature_part * 56], 56);
-            printf("[PICO -> PS5] Entregando Firma Criptografica Parte %d/19 a la consola\n", signature_part);
             signature_part++;
             if (signature_part == 19) {
                 signature_part = 0;
@@ -259,7 +234,6 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             return reqlen;
         }
         case 0xF2: {  
-            printf("[PICO -> PS5] Consola pregunta si la firma esta lista. Respondido: %s\n", signature_ready ? "SI (0)" : "NO (16)");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
             memset(&buffer[2], 0, 9);
@@ -276,7 +250,6 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        printf("[PS5 -> PICO] Recibido Desafio Criptografico (Nonce) Parte %d\n", part);
         if (part > 4) {
             return;
         }
@@ -284,14 +257,12 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
             nonce_ready = 1;
-            printf("[PICO] Nonce de PS5 capturado. Iniciando puenteo con mando Auth...\n");
             state = SENDING_RESET;
             nonce_part = 0;
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
-            printf("[PS5 -> PICO] Datos de Force Feedback recibidos (Len: %d)\n", bufsize);
         }
     }
 }
@@ -301,24 +272,25 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    printf("\n[CONEXIÓN] Dispositivo montado en puerto USB Host -> VID:%04X PID:%04X (addr: %d, inst: %d)\n", vid, pid, dev_addr, instance);
+    printf("\n[CONEXIÓN] USB Host -> VID:%04X PID:%04X\n", vid, pid);
 
-    if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc298) || (pid == 0xc299))) {  
+    // Protegemos el auth aceptando nativamente el C299
+    if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance; 
         wheel_pid = pid;
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
-        printf("[WHEEL] Volante asignado correctamente.\n");
+        printf("[WHEEL] Volante asignado.\n");
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
-        printf("[AUTH] Mando original de seguridad asignado a addr %d, inst %d\n", dev_addr, instance);
+        printf("[AUTH] Mando original asignado.\n");
     }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    printf("\n[DESCONEXIÓN] Dispositivo retirado del bus -> addr: %d\n", dev_addr);
+    printf("\n[DESCONEXIÓN] Dispositivo retirado -> addr: %d\n", dev_addr);
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
@@ -341,7 +313,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             memcpy(prev_raw, report_, len < 64 ? len : 64);
         }
 
-        // MODO 1: Volante sin inicializar (Driving Force Pro Mode)
         if (wheel_pid == 0xc294) {
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
@@ -358,48 +329,22 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2 = df->R2;
             report.R1 = df->R1;
             
+            // Asignación de botones de consola (intercambio para comodidad)
             report.select   = df->L3;     
             report.L3       = df->select; 
             report.R3       = df->start;  
             report.start    = df->R3;     
         } 
-        // MODO 2: Si el volante cae por error en protocolo de Driving Force GT
-        else if (wheel_pid == 0xc298) {
-            uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
-            report.wheel = raw_wheel << 2;
-            
-            // En el protocolo C298, los pedales están al final (Bytes 5 y 6)
-            report.throttle = report_[5] << 8;
-            report.brake    = report_[6] << 8;
-            report.clutch   = 0xFFFF; // No tiene embrague en este modo
-
-            // En el protocolo C298, los botones están al principio (Bytes 2, 3 y 4)
-            report.dpad     = report_[2] & 0x0F;
-            report.cross    = (report_[2] & 0x10) ? 1 : 0;
-            report.square   = (report_[2] & 0x20) ? 1 : 0;
-            report.circle   = (report_[2] & 0x40) ? 1 : 0;
-            report.triangle = (report_[2] & 0x80) ? 1 : 0;
-
-            report.R1       = (report_[3] & 0x01) ? 1 : 0;
-            report.L1       = (report_[3] & 0x02) ? 1 : 0;
-            report.R2       = (report_[3] & 0x04) ? 1 : 0;
-            report.L2       = (report_[3] & 0x08) ? 1 : 0;
-            report.select   = (report_[3] & 0x10) ? 1 : 0;
-            report.start    = (report_[3] & 0x20) ? 1 : 0;
-            report.R3       = (report_[3] & 0x40) ? 1 : 0;
-            report.L3       = (report_[3] & 0x80) ? 1 : 0;
-        }
-        // MODO 3: PROTOCOLO NATIVO ABSOLUTO G25 (El objetivo real)
         else if (wheel_pid == 0xc299) {
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2;
             
-            // En el protocolo G25 Nativo, los pedales ocupan los bytes 2, 3 y 4 legítimamente
+            // Pedales G25 Nativo
             report.throttle = report_[2] << 8;
             report.brake    = report_[3] << 8;
             report.clutch   = report_[4] << 8; 
 
-            // Los botones ocupan los bytes 5 y 6
+            // Botones G25 Nativo
             report.dpad     = report_[5] & 0x0F;
             report.square   = (report_[5] & 0x10) ? 1 : 0;
             report.cross    = (report_[5] & 0x20) ? 1 : 0;
