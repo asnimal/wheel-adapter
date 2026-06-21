@@ -47,7 +47,7 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// G29 Descriptor
+// G29 Descriptor de simulación para PS5
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -74,7 +74,7 @@ void hid_task() {
         return;
     }
 
-    // Remapeo físico intacto: L3 + R3 activa el botón PS
+    // Botón PS combinando L3 + R3
     report.PS = report.L3 && report.R3;
 
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -92,12 +92,11 @@ void hid_task() {
 
 void wheel_init_task() {
     static uint32_t last_send_time = 0;
-    static uint8_t mutation_step = 0; // Alternador de estrategia de envío
+    static uint8_t mutation_step = 0;
     uint32_t current_time = board_millis();
 
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
-            // Enviamos un único método limpio cada 1500ms para evitar saturar el Endpoint de Control
             if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
                 
@@ -105,40 +104,35 @@ void wheel_init_task() {
                 static uint8_t cmd_unlock_alt[] = { 0xf8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 static uint8_t cmd_universal_g[] = { 0xf8, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
-                printf("[LOG G25] Volante C294 (Inst:%d) -> Intentando Metodo de Inyeccion %d...\n", wheel_instance, mutation_step);
+                printf("[WHEEL] Estado C294 -> Ejecutando inyeccion tecnica %d...\n", mutation_step);
 
                 switch (mutation_step) {
                     case 0:
-                        // Estrategia 1: Comando nativo real mediante Control Transfer (SET_REPORT OUTPUT)
                         tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
                         mutation_step = 1;
                         break;
                     case 1:
-                        // Estrategia 2: Comando nativo real mediante canal Interrupt OUT (No toca EP0)
                         tuh_hid_send_report(wheel_device, wheel_instance, 0, cmd_g25_native, sizeof(cmd_g25_native));
                         mutation_step = 2;
                         break;
                     case 2:
-                        // Estrategia 3: Comando alternativo de desbloqueo mediante Control Transfer
                         tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_unlock_alt, sizeof(cmd_unlock_alt));
                         mutation_step = 3;
                         break;
                     case 3:
-                        // Estrategia 4: Barrido universal extendido mediante Control Transfer
                         tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_universal_g, sizeof(cmd_universal_g));
-                        mutation_step = 0; // Reiniciar bucle de intentos
+                        mutation_step = 0;
                         break;
                 }
             }
         } 
-        else if (wheel_pid == 0xc299 && !initialized) {
+        // Aceptamos de forma nativa tanto C298 como C299 tras la mutación exitosa
+        else if ((wheel_pid == 0xc298 || wheel_pid == 0xc299) && !initialized) {
             initialized = true;
-            printf("\n==================================================\n");
-            printf(" ¡MUTACIÓN DE HARDWARE CONFIRMADA EN INSTANCIA %d!\n", wheel_instance);
-            printf(" DETECTADO VOLANTE EN MODO NATIVO G25 (PID: C299) \n");
-            printf("==================================================\n\n");
+            printf("\n========================================================\n");
+            printf(" [OK] ¡MUTACIÓN COMPLETADA CON ÉXITO! PID ACTIVO: %04X\n", wheel_pid);
+            printf("========================================================\n\n");
             
-            // Apagar el muelle de fuerza por defecto
             static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };  
             tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
@@ -152,6 +146,7 @@ void auth_task() {
             case IDLE:
                 break;
             case SENDING_RESET:
+                printf("[PICO -> AUTH] Solicitando Reset de Auth (Report 0xF3)\n");
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
                 break;
@@ -161,7 +156,7 @@ void auth_task() {
                 set_buffer[2] = nonce_part;
                 set_buffer[3] = 0;
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                printf(".");
+                printf("[PICO -> AUTH] Enviando Nonce Parte %d al mando de seguridad\n", nonce_part);
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
                 nonce_part++;
@@ -185,7 +180,7 @@ int main() {
     stdio_init_all();
 
     printf("\n==================================================\n");
-    printf("   ADAPTER LOG MODE - EXAMINANDO PROTOCOLO G25    \n");
+    printf("   SNIFFER GLOBAL USB ACTIVADO - MODO PS5 ADAPTER \n");
     printf("==================================================\n");
 
     while (1) {
@@ -204,27 +199,25 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
         busy = false;
         switch (report_id) {
             case 0xF3:
-                printf("Sending nonce to auth controller");
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
+                printf("[AUTH -> PICO] Estado de Firma recibido: %02X (00=Listo)\n", get_buffer[2]);
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
                     state = RECEIVING_SIG;
-                    printf("\n");
-                    printf("Receiving signature from auth controller");
                 }
                 break;
             case 0xF1:
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
+                printf("[AUTH -> PICO] Descargada Firma Parte %d/19\n", signature_part);
                 signature_part++;
-                printf(".");
                 if (signature_part == 19) {
                     state = IDLE;
                     expected_part = 0;
                     signature_ready = true;
                     signature_part = 0;
-                    printf("\n");
+                    printf("[AUTH] ¡Firma criptografica completa almacenada en Pico!\n");
                 }
                 break;
         }
@@ -235,14 +228,14 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if ((dev_addr == auth_device) && (report_id == 0xF0)) {
         busy = false;
         if (nonce_part == 5) {
-            printf("\n");
-            printf("Waiting for auth controller to sign...\n");
+            printf("[PICO] Nonce enviado por completo. Esperando procesamiento del mando...\n");
             state = WAITING_FOR_SIG;
         }
     }
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    printf("[PS5 -> PICO] Consola solicita GET_REPORT ID: 0x%02X (Len: %d)\n", report_id, reqlen);
     switch (report_id) {
         case 0x03:
             memcpy(buffer, output_0x03, reqlen);
@@ -256,21 +249,17 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
-            if (signature_part == 0) {
-                printf("Sending signature to PS5");
-            }
-            printf(".");
             memcpy(&buffer[3], &signature[signature_part * 56], 56);
+            printf("[PICO -> PS5] Entregando Firma Criptografica Parte %d/19 a la consola\n", signature_part);
             signature_part++;
             if (signature_part == 19) {
                 signature_part = 0;
-                printf("\n");
                 board_led_write(true);
             }
             return reqlen;
         }
         case 0xF2: {  
-            printf("PS5 asks if signature ready (%s).\n", signature_ready ? "yes" : "no");
+            printf("[PICO -> PS5] Consola pregunta si la firma esta lista. Respondido: %s\n", signature_ready ? "SI (0)" : "NO (16)");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
             memset(&buffer[2], 0, 9);
@@ -287,10 +276,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        if (part == 0) {
-            printf("Getting nonce from PS5");
-        }
-        printf(".");
+        printf("[PS5 -> PICO] Recibido Desafio Criptografico (Nonce) Parte %d\n", part);
         if (part > 4) {
             return;
         }
@@ -298,14 +284,14 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
             nonce_ready = 1;
-            printf("\n");
-            printf("Sending reset to auth controller...\n");
+            printf("[PICO] Nonce de PS5 capturado. Iniciando puenteo con mando Auth...\n");
             state = SENDING_RESET;
             nonce_part = 0;
         }
     } else {
         if (bufsize > sizeof(ff_buf)) {
             memcpy(ff_buf, buffer + 1, sizeof(ff_buf));
+            printf("[PS5 -> PICO] Datos de Force Feedback recibidos (Len: %d)\n", bufsize);
         }
     }
 }
@@ -315,22 +301,25 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    printf("\ntuh_hid_mount_cb %04x:%04x %d %d\n", vid, pid, dev_addr, instance);
+    printf("\n[CONEXIÓN] Dispositivo montado en puerto USB Host -> VID:%04X PID:%04X (addr: %d, inst: %d)\n", vid, pid, dev_addr, instance);
 
-    if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc299))) {  
+    // Corregido: Ahora C298 entra legítimamente como volante y no rompe la lógica de seguridad
+    if ((vid == 0x046d) && ((pid == 0xc294) || (pid == 0xc298) || (pid == 0xc299))) {  
         wheel_device = dev_addr;
         wheel_instance = instance; 
         wheel_pid = pid;
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
+        printf("[WHEEL] Volante asignado correctamente. Deteniendo posible usurpacion de Auth.\n");
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
+        printf("[AUTH] Mando original de seguridad asignado a addr %d, inst %d\n", dev_addr, instance);
     }
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    printf("\ntuh_hid_umount_cb\n");
+    printf("\n[DESCONEXIÓN] Dispositivo retirado del bus -> addr: %d\n", dev_addr);
     if (dev_addr == wheel_device) {
         wheel_device = 0;
         wheel_instance = 0;
@@ -347,7 +336,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         
         static uint8_t prev_raw[64] = {0};
         if (memcmp(prev_raw, report_, len < 64 ? len : 64) != 0) {
-            printf("[DATA PID:%04X len:%d] ", wheel_pid, len);
+            printf("[WHEEL DATA] PID:%04X -> ", wheel_pid);
             for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
             printf("\n");
             memcpy(prev_raw, report_, len < 64 ? len : 64);
@@ -373,7 +362,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = df->start;  
             report.start    = df->R3;     
         } 
-        else if (wheel_pid == 0xc299) {
+        // Agregado mapeo para soportar la lectura de datos tanto en modo C298 como C299
+        else if (wheel_pid == 0xc298 || wheel_pid == 0xc299) {
             uint16_t raw_wheel = report_[0] | ((report_[1] & 0x3F) << 8);
             report.wheel = raw_wheel << 2;
             report.throttle = report_[2] << 8;
