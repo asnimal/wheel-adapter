@@ -26,6 +26,7 @@ uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
+
 enum {
     IDLE = 0,
     SENDING_RESET = 1,
@@ -33,6 +34,7 @@ enum {
     WAITING_FOR_SIG = 3,
     RECEIVING_SIG = 4,
 };
+
 uint8_t state = IDLE;
 
 bool initialized = true;
@@ -62,7 +64,7 @@ void report_init() {
     report.ly = 0x80;
     report.rx = 0x80;
     report.ry = 0x80;
-    report.clutch = 0xFFFF; // Valor correcto en reposo (Suelto)
+    report.clutch = 0xFFFF;
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -71,16 +73,17 @@ void hid_task() {
         return;
     }
 
-    // Combinación física real para el botón PS (L3 + R3 en el mapa de salida)
+    // Combinación física real para el botón PS (L3 + R3 usando los dos botones rojos centrales)
     report.PS = report.L3 && report.R3;
-
+    
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
         memcpy(&prev_report, &report, sizeof(report));
     }
 
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
-        if (wheel_device) {
+        // Solo mandamos el Force Feedback si el volante ya terminó su calibración física
+        if (wheel_device && initialized) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
         }
         memcpy(prev_ff_buf, ff_buf, sizeof(ff_buf));
@@ -89,10 +92,12 @@ void hid_task() {
 
 void wheel_init_task() {
     static uint32_t last_send_time = 0;
+    static uint32_t calibration_start_time = 0;
     uint32_t current_time = board_millis();
-
+    
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
+            calibration_start_time = 0;
             if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
                 // Comando único y estricto hacia modo nativo G25
@@ -102,15 +107,25 @@ void wheel_init_task() {
             }
         } 
         else if (wheel_pid == 0xc299 && !initialized) {
-            initialized = true;
-            printf("\n========================================================\n");
-            printf(" [OK] ¡VOLANTE EN MODO NATIVO G25 (C299) CONFIGURADO!\n");
-            printf("========================================================\n\n");
-            // Suavizar motores tras la calibración inicial
-            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
-            tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
+            if (calibration_start_time == 0) {
+                calibration_start_time = current_time;
+                printf("[WHEEL] Volante en modo G25. Esperando 8 segundos a que termine el auto-calibrado...\n");
+            }
+            
+            // Retardo de 8 segundos para evitar el micro-parón y que el volante quede recto
+            if (current_time - calibration_start_time >= 8000) {
+                initialized = true;
+                printf("\n========================================================\n");
+                printf(" [OK] ¡VOLANTE EN MODO NATIVO G25 (C299) CONFIGURADO!\n");
+                printf("========================================================\n\n");
+                // Suavizar motores tras la calibración inicial
+                static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
+            }
         }
+    } else {
+        calibration_start_time = 0;
     }
 }
 
@@ -297,7 +312,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 
     if (len > 0 && dev_addr == wheel_device) {
         
-        // LIMITADOR DE LOG: Evita inundar la consola (Imprime cada 300ms)
+        // LIMITADOR DE LOG: Evita que el timestamp inunde Putty (Imprime cada 300ms)
         if (now - last_print_time >= 300) {
             printf("[DATA C299] ");
             for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
@@ -331,61 +346,46 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             // =================================================================
 
             // 1. EJE DE DIRECCIÓN
-            // Centrado perfecto es 0x8000. Pasamos directo al reporte de salida.
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES DE CARRERA (Invertidos por hardware: 0xFF en reposo, 0x00 pisado)
-            // Byte 5 = Acelerador | Byte 6 = Freno
-            report.throttle = (0xFF - report_[5]) << 8;
-            report.brake    = (0xFF - report_[6]) << 8;
+            // 2. PEDALES DE CARRERA (Sin Invertir, como funcionaba bien en tu base)
+            report.throttle = report_[5] << 8;
+            report.brake    = report_[6] << 8;
 
-            // 3. EMBRAGUE (Inversión corregida: Reposo G29 es 0xFFFF, Pisado a fondo es 0x0000)
             if (report_[7] >= 0xF5) {
-                report.clutch = 0xFFFF; // Totalmente suelto (Evita oscilaciones en reposo)
+                report.clutch = 0xFF00; // Totalmente suelto en reposo
             } else {
-                report.clutch = report_[7] << 8; // Disminuye proporcionalmente al pisar
+                report.clutch = report_[7] << 8; // Escalado progresivo de pisada
             }
 
-            // 4. CRUCETA (D-PAD del Shifter)
-            // Filtrado de seguridad sobre los 4 bits inferiores del Byte 0
+            // 3. CRUCETA (D-PAD)
             uint8_t hat = report_[0] & 0x0F;
             report.dpad = (hat <= 7) ? hat : 0x08;
 
-            // 5. BOTONES FÍSICOS (Mapeo corregido basándose en el byte real report_[1])
-            // Botones rojos de la palanca de cambios vinculados a las figuras geométricas principales
-            report.square   = (report_[1] & 0x10) ? 1 : 0; // Botón Rojo 1
-            report.cross    = (report_[1] & 0x20) ? 1 : 0; // Botón Rojo 2
-            report.circle   = (report_[1] & 0x40) ? 1 : 0; // Botón Rojo 3
-            report.triangle = (report_[1] & 0x80) ? 1 : 0; // Botón Rojo 4
+            // 4. BOTONES NEGROS DE LA PALANCA
+            report.cross    = (report_[0] & 0x10) ? 1 : 0;
+            report.square   = (report_[0] & 0x20) ? 1 : 0;
+            report.circle   = (report_[0] & 0x40) ? 1 : 0;
+            report.triangle = (report_[0] & 0x80) ? 1 : 0;
 
-            // Levas de cambio detrás del volante (Mapeadas a L1 y R1 para conducción estándar)
-            report.R1       = (report_[1] & 0x04) ? 1 : 0; // Leva Derecha (Shift Up)
-            report.L1       = (report_[1] & 0x08) ? 1 : 0; // Leva Izquierda (Shift Down)
+            // 5. LEVAS Y BOTONES DEL VOLANTE
+            report.L1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda
+            report.R1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha
+            report.L2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo
+            report.R2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho
 
-            // Botones físicos integrados en el propio aro del volante (Izquierdo y Derecho)
-            // Los configuramos como L3 y R3 de modo que si pulsas ambos a la vez, se activa el botón PS en hid_task()
-            report.L3       = (report_[1] & 0x02) ? 1 : 0; // Botón de Aro Izquierdo
-            report.R3       = (report_[1] & 0x01) ? 1 : 0; // Botón de Aro Derecho
+            // 6. BOTONES ROJOS DE LA PALANCA (Orden estricto pedido: select, L3, R3, start)
+            report.select   = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 1 (Izquierdo)
+            report.L3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2 (Central Izq)
+            report.R3       = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3 (Central Der)
+            report.start    = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho)
 
-            // Opciones secundarias del mando de PlayStation
-            report.select   = 0; 
-            report.start    = 0;
-            report.L2       = 0;
-            report.R2       = 0;
-
-            // 6. MAPEO DE MARCHAS H-SHIFTER (Extraído desde report_[2] según el Log)
-            // Nota: Si tu struct 'g29_report_t' en reports.h cuenta con campos dedicados para las marchas,
-            // puedes descomentar las líneas de abajo para dotar al adaptador de soporte H-Shifter completo:
-            /*
-            report.gear1   = (report_[2] & 0x01) ? 1 : 0;
-            report.gear2   = (report_[2] & 0x02) ? 1 : 0;
-            report.gear3   = (report_[2] & 0x04) ? 1 : 0;
-            report.gear4   = (report_[2] & 0x08) ? 1 : 0;
-            report.gear5   = (report_[2] & 0x10) ? 1 : 0;
-            report.gear6   = (report_[2] & 0x20) ? 1 : 0;
-            report.reverse = (report_[2] & 0x40) ? 1 : 0;
-            */
+            // 7. MARCHAS DE LA PALANCA EN H
+            // Inyectamos la lectura del report_[2] directamente en la variable 'whatever[0]' 
+            // de la estructura original del G29, que es donde la consola espera las marchas.
+            // 0x01 = 1ª, 0x02 = 2ª, 0x04 = 3ª, 0x08 = 4ª, 0x10 = 5ª, 0x20 = 6ª, 0x40 = Reversa
+            report.whatever[0] = report_[2] & 0x7F;
         }
     }
 
