@@ -372,6 +372,15 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2 (Central Izquierdo) -> Envía L3
             report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3 (Central Derecho) -> Envía R3
             report.select   = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho) -> Envía START
+
+            // 5. PALANCA DE CAMBIOS EN H (Mapeo directo de marchas desde el Byte 2)
+            report.gear1    = (report_[2] & 0x01) ? 1 : 0; // 1ª velocidad (Bit 0)
+            report.gear2    = (report_[2] & 0x02) ? 1 : 0; // 2ª velocidad (Bit 1)
+            report.gear3    = (report_[2] & 0x04) ? 1 : 0; // 3ª velocidad (Bit 2)
+            report.gear4    = (report_[2] & 0x08) ? 1 : 0; // 4ª velocidad (Bit 3)
+            report.gear5    = (report_[2] & 0x10) ? 1 : 0; // 5ª velocidad (Bit 4)
+            report.gear6    = (report_[2] & 0x20) ? 1 : 0; // 6ª velocidad (Bit 5)
+            report.reverse  = (report_[2] & 0x40) ? 1 : 0; // Marcha Atrás (Bit 6)
         }
     }
 
