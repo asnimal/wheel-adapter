@@ -26,7 +26,6 @@ uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
-
 enum {
     IDLE = 0,
     SENDING_RESET = 1,
@@ -34,7 +33,6 @@ enum {
     WAITING_FOR_SIG = 3,
     RECEIVING_SIG = 4,
 };
-
 uint8_t state = IDLE;
 
 bool initialized = true;
@@ -65,6 +63,16 @@ void report_init() {
     report.rx = 0x80;
     report.ry = 0x80;
     report.clutch = 0xFFFF;
+    
+    // Inicializar marchas en reposo
+    report.gear1 = 0;
+    report.gear2 = 0;
+    report.gear3 = 0;
+    report.gear4 = 0;
+    report.gear5 = 0;
+    report.gear6 = 0;
+    report.reverse = 0;
+    
     memcpy(&prev_report, &report, sizeof(report));
 }
 
@@ -336,17 +344,18 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES DE CARRERA (0xFF en reposo, 0x00 pisado)
-            // Quitamos la inversión (0xFF -) ya que la consola espera nativamente este comportamiento
-            report.throttle = report_[5] << 8;
-            report.brake    = report_[6] << 8;
-
+            // 2. PEDALES DE CARRERA (Invertidos por hardware: 0xFF en reposo, 0x00 pisado)
+            // Byte 5 = Acelerador | Byte 6 = Freno
+            // Los invertimos restando a 0xFF y los escalamos a los 16 bits (<< 8) del G29
+            report.throttle = (0xFF - report_[5]) << 8;
+            report.brake    = (0xFF - report_[6]) << 8;
+            
             // El Embrague se ubica en el Byte 7 compartiendo espacio con la base del clock.
             // Para evitar oscilaciones parásitas, filtramos el ruido en reposo.
             if (report_[7] >= 0xF5) {
-                report.clutch = 0xFF00; // Totalmente suelto en reposo
+                report.clutch = 0x0000; // Totalmente suelto
             } else {
-                report.clutch = report_[7] << 8; // Escalado progresivo de pisada sin inversión
+                report.clutch = (0xFF - report_[7]) << 8; // Escalado progresivo de pisada
             }
 
             // 3. CRUCETA (D-PAD)
@@ -355,32 +364,27 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.dpad = (hat <= 7) ? hat : 0x08;
 
             // 4. BOTONES DEL ARO Y PALANCA (Mapeo desde ceros lógicos, evita pulsaciones fantasma)
-            // Intercambio solicitado entre Cuadrado y Equis (Cross) en el panel de la palanca
-            report.cross    = (report_[0] & 0x10) ? 1 : 0;
-            report.square   = (report_[0] & 0x20) ? 1 : 0;
+            report.square   = (report_[0] & 0x10) ? 1 : 0;
+            report.cross    = (report_[0] & 0x20) ? 1 : 0;
             report.circle   = (report_[0] & 0x40) ? 1 : 0;
             report.triangle = (report_[0] & 0x80) ? 1 : 0;
+            report.L1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda
+            report.R1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha
+            report.L2       = (report_[1] & 0x04) ? 1 : 0;
+            report.R2       = (report_[1] & 0x08) ? 1 : 0;
+            report.select   = (report_[1] & 0x10) ? 1 : 0;
+            report.start    = (report_[1] & 0x20) ? 1 : 0;
+            report.L3       = (report_[1] & 0x40) ? 1 : 0; // Botón físico asignado
+            report.R3       = (report_[1] & 0x80) ? 1 : 0; // Botón físico asignado
 
-            // Intercambio de lados para levas y botones físicos del aro de dirección
-            report.R1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda física actúa como R1
-            report.L1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha física actúa como L1
-            report.R2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo físico actúa como R2
-            report.L2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho físico actúa como L2
-
-            // Botones rojos ordenados rigurosamente de izquierda a derecha: select, L3, R3, start
-            report.L3       = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 1 (Izquierdo) -> Envía SELECT
-            report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2 (Central Izquierdo) -> Envía L3
-            report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3 (Central Derecho) -> Envía R3
-            report.select   = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho) -> Envía START
-
-            // 5. PALANCA DE CAMBIOS EN H (Mapeo directo de marchas desde el Byte 2)
-            report.gear1    = (report_[2] & 0x01) ? 1 : 0; // 1ª velocidad (Bit 0)
-            report.gear2    = (report_[2] & 0x02) ? 1 : 0; // 2ª velocidad (Bit 1)
-            report.gear3    = (report_[2] & 0x04) ? 1 : 0; // 3ª velocidad (Bit 2)
-            report.gear4    = (report_[2] & 0x08) ? 1 : 0; // 4ª velocidad (Bit 3)
-            report.gear5    = (report_[2] & 0x10) ? 1 : 0; // 5ª velocidad (Bit 4)
-            report.gear6    = (report_[2] & 0x20) ? 1 : 0; // 6ª velocidad (Bit 5)
-            report.reverse  = (report_[2] & 0x40) ? 1 : 0; // Marcha Atrás (Bit 6)
+            // 5. MAPEO DE MARCHAS EN MODO H (G25 NATIVO - PALANCA EN BYTE 2)
+            report.gear1    = (report_[2] & 0x01) ? 1 : 0;
+            report.gear2    = (report_[2] & 0x02) ? 1 : 0;
+            report.gear3    = (report_[2] & 0x04) ? 1 : 0;
+            report.gear4    = (report_[2] & 0x08) ? 1 : 0;
+            report.gear5    = (report_[2] & 0x10) ? 1 : 0;
+            report.gear6    = (report_[2] & 0x20) ? 1 : 0;
+            report.reverse  = (report_[2] & 0x40) ? 1 : 0;
         }
     }
 
