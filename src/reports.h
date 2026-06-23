@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// G29 HID report
+// G29 HID report (ESTRUCTURA ORIGINAL EXACTA DE 14 BOTONES)
 typedef struct __attribute__((packed)) {
     uint8_t lx;
     uint8_t ly;
@@ -24,19 +24,8 @@ typedef struct __attribute__((packed)) {
     uint32_t R3 : 1;
     uint32_t PS : 1;
     uint32_t touchpad : 1;
-    
-    // --- CAMPOS PARA LA PALANCA H ---
-    uint32_t gear1 : 1;
-    uint32_t gear2 : 1;
-    uint32_t gear3 : 1;
-    uint32_t gear4 : 1;
-    uint32_t gear5 : 1;
-    uint32_t gear6 : 1;
-    uint32_t gearR : 1;
-    // ---------------------------------------
-    
-    uint32_t counter : 7; // Relleno para alinear a 32 bits (4 bytes)
-    uint8_t whatever[35];
+    uint32_t counter : 6; // Relleno original de 6 bits
+    uint8_t whatever[35]; // Aquí meteremos el estado de las marchas
     uint16_t wheel;
     uint16_t throttle;
     uint16_t brake;
