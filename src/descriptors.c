@@ -58,7 +58,7 @@ uint8_t const desc_hid_report[] = {
     0x81, 0x02,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0x06, 0x00, 0xFF,  //   Usage Page (Vendor Defined 0xFF00)
     0x09, 0x20,        //   Usage (0x20)
-    0x75, 0x07,        //   Report Size (7)       <-- ¡CAMBIADO DE 0x06 A 0x07!
+    0x75, 0x07,        //   Report Size (7)       <-- Relleno de 7 bits
     0x95, 0x01,        //   Report Count (1)
     0x81, 0x02,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
@@ -109,9 +109,7 @@ uint8_t const desc_hid_report[] = {
 #define EPNUM_HID_OUT 0x03
 
 uint8_t const desc_configuration[] = {
-    // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_SELF_POWERED, 200),
-    // Interface number, string index, protocol, report descriptor len, EP OUT address, EP IN address, size & polling interval
     TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID_OUT, EPNUM_HID_IN, CFG_TUD_HID_EP_BUFSIZE, 5)
 };
 
