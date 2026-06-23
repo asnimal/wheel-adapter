@@ -28,7 +28,7 @@ tusb_desc_device_t const desc_device = {
     .bNumConfigurations = 0x01
 };
 
-// G29
+// Descriptor de reporte modificado para dar soporte a 25 botones oficiales de G29
 uint8_t const desc_hid_report[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
     0x09, 0x04,        // Usage (Joystick)
@@ -55,15 +55,15 @@ uint8_t const desc_hid_report[] = {
     0x65, 0x00,        //   Unit (None)
     0x05, 0x09,        //   Usage Page (Button)
     0x19, 0x01,        //   Usage Minimum (0x01)
-    0x29, 0x0E,        //   Usage Maximum (0x0E)
+    0x29, 0x19,        //   Usage Maximum (25) -> Declaramos los 25 botones oficiales
     0x15, 0x00,        //   Logical Minimum (0)
     0x25, 0x01,        //   Logical Maximum (1)
     0x75, 0x01,        //   Report Size (1)
-    0x95, 0x0E,        //   Report Count (14)
+    0x95, 0x19,        //   Report Count (25) -> Asignamos espacio a los 25 botones
     0x81, 0x02,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0x06, 0x00, 0xFF,  //   Usage Page (Vendor Defined 0xFF00)
     0x09, 0x20,        //   Usage (0x20)
-    0x75, 0x06,        //   Report Size (6)
+    0x75, 0x03,        //   Report Size (3) -> Relleno de 3 bits para cerrar la sección en 32 bits (4 bytes de botones)
     0x95, 0x01,        //   Report Count (1)
     0x81, 0x02,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
     0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
@@ -114,17 +114,14 @@ uint8_t const desc_hid_report[] = {
 #define EPNUM_HID_OUT 0x03
 
 uint8_t const desc_configuration[] = {
-    // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_SELF_POWERED, 200),
-
-    // Interface number, string index, protocol, report descriptor len, EP OUT address, EP IN address, size & polling interval
     TUD_HID_INOUT_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID_OUT, EPNUM_HID_IN, CFG_TUD_HID_EP_BUFSIZE, 5)
 };
 
 char const* string_desc_arr[] = {
-    (const char[]){ 0x09, 0x04 },      // 0: is supported language is English (0x0409)
-    "Logitech",                        // 1: Manufacturer
-    "G29 Driving Force Racing Wheel",  // 2: Product
+    (const char[]){ 0x09, 0x04 },
+    "Logitech",
+    "G29 Driving Force Racing Wheel",
 };
 
 uint8_t const* tud_descriptor_device_cb(void) {
@@ -141,8 +138,6 @@ uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
 
 static uint16_t _desc_str[32];
 
-// Invoked when received GET STRING DESCRIPTOR request
-// Application return pointer to descriptor, whose contents must exist long enough for transfer to complete
 uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     uint8_t chr_count;
 
@@ -150,26 +145,20 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
         memcpy(&_desc_str[1], string_desc_arr[0], 2);
         chr_count = 1;
     } else {
-        // Note: the 0xEE index string is a Microsoft OS 1.0 Descriptors.
-        // https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-defined-usb-descriptors
-
         if (!(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0])))
             return NULL;
 
         const char* str = string_desc_arr[index];
 
-        // Cap at max char
         chr_count = strlen(str);
         if (chr_count > 31)
             chr_count = 31;
 
-        // Convert ASCII string into UTF-16
         for (uint8_t i = 0; i < chr_count; i++) {
             _desc_str[1 + i] = str[i];
         }
     }
 
-    // first byte is length (including header), second byte is string type
     _desc_str[0] = (TUSB_DESC_STRING << 8) | (2 * chr_count + 2);
 
     return _desc_str;
