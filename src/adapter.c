@@ -115,7 +115,7 @@ void wheel_init_task() {
 
             // Esperar 6 segundos para permitir que complete la calibración e inicialización física
             if (!calibration_done && (current_time - c299_mount_time >= 6000)) {
-                calibration_done = true; // Desbloquea motores y FFB
+                calibration_done = true; // Desbloquea los efectos de fuerza de los juegos
                 printf("[WHEEL] Calibrado completado sin interrupciones. Motores desbloqueados.\n");
                 static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
@@ -305,16 +305,17 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
-    static uint8_t prev_raw_report[16] = {0};
+    static uint8_t prev_btn_state[3] = {0};
 
     if (len > 0 && dev_addr == wheel_device) {
         
-        // FILTRADO DE LOG: Solo imprime en Putty si un botón o eje del volante cambia realmente
-        if (memcmp(prev_raw_report, report_, len) != 0) {
+        // FILTRADO INTELIGENTE DE LOG: Solo imprime en Putty si cambia el estado digital de los botones, cruceta o marchas (Bytes 0, 1 y 2).
+        // Ignora las oscilaciones analógicas del sensor de dirección y potenciómetros para mantener Putty limpio.
+        if (memcmp(prev_btn_state, report_, 3) != 0) {
             printf("[DATA G25] ");
             for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
             printf("\n");
-            memcpy(prev_raw_report, report_, len);
+            memcpy(prev_btn_state, report_, 3);
         }
 
         if (wheel_pid == 0xc294) {
@@ -339,7 +340,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         } 
         else if (wheel_pid == 0xc299) {
             // =================================================================
-            // TRADUCCIÓN ESTRICTA G25 (C299) -> PROTOCOLO OFICIAL G29
+            // TRADUCCIÓN NATIVA G25 (C299) -> PROTOCOLO OFICIAL G29
             // =================================================================
 
             // 1. DIRECCIÓN
@@ -361,7 +362,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             uint8_t hat = report_[0] & 0x0F;
             report.dpad = (hat <= 7) ? hat : 0x08;
 
-            // 4. BOTONES DEL PANEL DE LA PALANCA (Los 4 negros de la botonera)
+            // 4. BOTONES DEL PANEL DE LA PALANCA (Los 4 negros)
             report.cross    = (report_[0] & 0x10) ? 1 : 0; 
             report.square   = (report_[0] & 0x20) ? 1 : 0; 
             report.circle   = (report_[0] & 0x40) ? 1 : 0; 
@@ -379,7 +380,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 3 (Central Derecho, 0x20) -> R3
             report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
 
-            // 7. PALANCA DE CAMBIOS EN PATRÓN H (Mapeados a los botones 13 al 19 del G29)
+            // 7. PALANCA DE CAMBIOS EN PATRÓN H (Mapeados a los botones oficiales 15 al 21 en G29)
             uint8_t gears = report_[2];
             report.gear_1  = (gears & 0x01) ? 1 : 0; // Marcha 1
             report.gear_2  = (gears & 0x02) ? 1 : 0; // Marcha 2
