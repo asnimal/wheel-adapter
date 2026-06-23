@@ -356,14 +356,17 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2       = (report_[1] & 0x04) ? 1 : 0; 
             report.L2       = (report_[1] & 0x08) ? 1 : 0; 
 
-            // Botones rojos ordenados rigurosamente de izquierda a derecha: select, L3, R3, start
-            report.L3       = (report_[1] & 0x10) ? 1 : 0; 
-            report.R3       = (report_[1] & 0x20) ? 1 : 0; 
-            report.start    = (report_[1] & 0x40) ? 1 : 0; 
-            report.select   = (report_[1] & 0x80) ? 1 : 0; 
+            // =================================================================
+            // 5. BOTONES ROJOS (CORREGIDO: Orden físico real de izquierda a derecha)
+            // El hardware envía 0x10 para el botón más a la izquierda.
+            // =================================================================
+            report.select   = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 1 (Izquierdo)
+            report.L3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2
+            report.R3       = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3
+            report.start    = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho)
 
             // =================================================================
-            // 5. PALANCA DE CAMBIOS (H-PATTERN)
+            // 6. PALANCA DE CAMBIOS (H-PATTERN)
             // El Byte 2 (report_[2]) contiene el estado de las marchas.
             // =================================================================
             uint8_t shifter = report_[2];
