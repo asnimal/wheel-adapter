@@ -24,6 +24,17 @@ typedef struct __attribute__((packed)) {
     uint32_t R3 : 1;
     uint32_t PS : 1;
     uint32_t touchpad : 1;
+    
+    // --- NUEVOS CAMPOS PARA LA PALANCA H ---
+    uint32_t gear1 : 1;
+    uint32_t gear2 : 1;
+    uint32_t gear3 : 1;
+    uint32_t gear4 : 1;
+    uint32_t gear5 : 1;
+    uint32_t gear6 : 1;
+    uint32_t gearR : 1;
+    // ---------------------------------------
+    
     uint32_t counter : 6;
     uint8_t whatever[35];
     uint16_t wheel;
