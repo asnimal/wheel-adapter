@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// G29 HID report
+// Reporte HID de G29 (Modificado con soporte para 25 botones)
 typedef struct __attribute__((packed)) {
     uint8_t lx;
     uint8_t ly;
@@ -25,18 +25,23 @@ typedef struct __attribute__((packed)) {
     uint32_t PS : 1;
     uint32_t touchpad : 1;
     
-    // --- NUEVOS CAMPOS PARA LA PALANCA H ---
-    uint32_t gear1 : 1;
-    uint32_t gear2 : 1;
-    uint32_t gear3 : 1;
-    uint32_t gear4 : 1;
-    uint32_t gear5 : 1;
-    uint32_t gear6 : 1;
-    uint32_t gearR : 1;
-    // ---------------------------------------
+    // Mapeo de Marchas en H (Botones 14 al 20)
+    uint32_t gear_1 : 1;  // Marcha 1
+    uint32_t gear_2 : 1;  // Marcha 2
+    uint32_t gear_3 : 1;  // Marcha 3
+    uint32_t gear_4 : 1;  // Marcha 4
+    uint32_t gear_5 : 1;  // Marcha 5
+    uint32_t gear_6 : 1;  // Marcha 6
+    uint32_t reverse : 1; // Marcha Atrás
     
-    uint32_t counter : 6;
-    uint8_t whatever[35];
+    // Botones adicionales para cumplir con el descriptor de 25 botones (Botones 21 al 24)
+    uint32_t btn_21 : 1;
+    uint32_t btn_22 : 1;
+    uint32_t btn_23 : 1;
+    uint32_t btn_24 : 1;
+    
+    uint32_t counter : 3; // 3 bits de relleno para completar los 32 bits (4 bytes)
+    uint8_t whatever[34]; // Reducido de 35 a 34 para mantener la alineación exacta
     uint16_t wheel;
     uint16_t throttle;
     uint16_t brake;
@@ -44,7 +49,7 @@ typedef struct __attribute__((packed)) {
     uint8_t whatever2[13];
 } g29_report_t;
 
-// Driving Force HID report
+// Reporte HID de Driving Force
 typedef struct __attribute__((packed)) {
     uint32_t wheel : 10;
     uint32_t cross : 1;
