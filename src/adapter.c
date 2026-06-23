@@ -72,7 +72,6 @@ void hid_task() {
     // Combinación física real para el botón PS (L3 + R3)
     report.PS = report.L3 && report.R3;
 
-    // DEBUG: Avisar por Putty cuando se active el botón PS
     if (report.PS && !prev_report.PS) {
         printf("[DEBUG] ¡L3+R3 detectados! Botón PS activado y enviado a PS5.\n");
     }
@@ -354,18 +353,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start    = (report_[1] & 0x80) ? 1 : 0; 
 
             // 6. PALANCA DE CAMBIOS (H-PATTERN)
+            // Al no poder añadir 7 botones más sin romper el registro de la PS5,
+            // enviamos el estado crudo de la palanca en el byte de vendor "whatever[0]".
             uint8_t shifter = report_[2];
-            report.gear1 = (shifter & 0x01) ? 1 : 0;
-            report.gear2 = (shifter & 0x02) ? 1 : 0;
-            report.gear3 = (shifter & 0x04) ? 1 : 0;
-            report.gear4 = (shifter & 0x08) ? 1 : 0;
-            report.gear5 = (shifter & 0x10) ? 1 : 0;
-            report.gear6 = (shifter & 0x20) ? 1 : 0;
-            report.gearR = (shifter & 0x40) ? 1 : 0;
+            report.whatever[0] = shifter;
 
-            // DEBUG: Avisar por Putty cuando se meta una marcha
             if (shifter > 0) {
-                printf("[DEBUG] Marcha detectada en Byte 2: 0x%02X\n", shifter);
+                printf("[DEBUG] Marcha detectada en Byte 2: 0x%02X (Enviada en vendor)\n", shifter);
             }
         }
     }
