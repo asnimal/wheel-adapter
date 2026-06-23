@@ -35,7 +35,7 @@ typedef struct __attribute__((packed)) {
     uint32_t gearR : 1;
     // ---------------------------------------
     
-    uint32_t counter : 7; // <-- ¡CAMBIADO DE 6 A 7 PARA ALINEAR A 32 BITS!
+    uint32_t counter : 7; // Relleno para alinear a 32 bits (4 bytes)
     uint8_t whatever[35];
     uint16_t wheel;
     uint16_t throttle;
