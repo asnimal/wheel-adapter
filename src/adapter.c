@@ -73,17 +73,15 @@ void hid_task() {
         return;
     }
 
-    // Combinación física real para el botón PS (L3 + R3 usando los dos botones rojos centrales)
+    // Combinación física real para el botón PS (L3 + R3)
     report.PS = report.L3 && report.R3;
-    
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
         memcpy(&prev_report, &report, sizeof(report));
     }
 
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
-        // Solo mandamos el Force Feedback si el volante ya terminó su calibración física
-        if (wheel_device && initialized) {
+        if (wheel_device) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
         }
         memcpy(prev_ff_buf, ff_buf, sizeof(ff_buf));
@@ -92,12 +90,9 @@ void hid_task() {
 
 void wheel_init_task() {
     static uint32_t last_send_time = 0;
-    static uint32_t calibration_start_time = 0;
     uint32_t current_time = board_millis();
-    
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
-            calibration_start_time = 0;
             if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
                 // Comando único y estricto hacia modo nativo G25
@@ -107,25 +102,15 @@ void wheel_init_task() {
             }
         } 
         else if (wheel_pid == 0xc299 && !initialized) {
-            if (calibration_start_time == 0) {
-                calibration_start_time = current_time;
-                printf("[WHEEL] Volante en modo G25. Esperando 8 segundos a que termine el auto-calibrado...\n");
-            }
-            
-            // Retardo de 8 segundos para evitar el micro-parón y que el volante quede recto
-            if (current_time - calibration_start_time >= 8000) {
-                initialized = true;
-                printf("\n========================================================\n");
-                printf(" [OK] ¡VOLANTE EN MODO NATIVO G25 (C299) CONFIGURADO!\n");
-                printf("========================================================\n\n");
-                // Suavizar motores tras la calibración inicial
-                static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
-                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
-            }
+            initialized = true;
+            printf("\n========================================================\n");
+            printf(" [OK] ¡VOLANTE EN MODO NATIVO G25 (C299) CONFIGURADO!\n");
+            printf("========================================================\n\n");
+            // Suavizar motores tras la calibración inicial
+            static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
+            tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
         }
-    } else {
-        calibration_start_time = 0;
     }
 }
 
@@ -346,46 +331,47 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             // =================================================================
 
             // 1. EJE DE DIRECCIÓN
+            // En C299, la posicion real progresiva se encuentra en los bytes 3 y 4.
+            // Centrado perfecto es 0x8000. Lo pasamos directo al reporte de salida.
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES DE CARRERA (Sin Invertir, como funcionaba bien en tu base)
+            // 2. PEDALES DE CARRERA (0xFF en reposo, 0x00 pisado)
+            // Quitamos la inversión (0xFF -) ya que la consola espera nativamente este comportamiento
             report.throttle = report_[5] << 8;
             report.brake    = report_[6] << 8;
 
+            // El Embrague se ubica en el Byte 7 compartiendo espacio con la base del clock.
+            // Para evitar oscilaciones parásitas, filtramos el ruido en reposo.
             if (report_[7] >= 0xF5) {
                 report.clutch = 0xFF00; // Totalmente suelto en reposo
             } else {
-                report.clutch = report_[7] << 8; // Escalado progresivo de pisada
+                report.clutch = report_[7] << 8; // Escalado progresivo de pisada sin inversión
             }
 
             // 3. CRUCETA (D-PAD)
+            // Filtrado de seguridad sobre los 4 bits inferiores del Byte 0
             uint8_t hat = report_[0] & 0x0F;
             report.dpad = (hat <= 7) ? hat : 0x08;
 
-            // 4. BOTONES NEGROS DE LA PALANCA
+            // 4. BOTONES DEL ARO Y PALANCA (Mapeo desde ceros lógicos, evita pulsaciones fantasma)
+            // Intercambio solicitado entre Cuadrado y Equis (Cross) en el panel de la palanca
             report.cross    = (report_[0] & 0x10) ? 1 : 0;
             report.square   = (report_[0] & 0x20) ? 1 : 0;
             report.circle   = (report_[0] & 0x40) ? 1 : 0;
             report.triangle = (report_[0] & 0x80) ? 1 : 0;
 
-            // 5. LEVAS Y BOTONES DEL VOLANTE
-            report.L1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda
-            report.R1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha
-            report.L2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo
-            report.R2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho
+            // Intercambio de lados para levas y botones físicos del aro de dirección
+            report.R1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda física actúa como R1
+            report.L1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha física actúa como L1
+            report.R2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo físico actúa como R2
+            report.L2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho físico actúa como L2
 
-            // 6. BOTONES ROJOS DE LA PALANCA (Orden estricto pedido: select, L3, R3, start)
-            report.select   = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 1 (Izquierdo)
-            report.L3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2 (Central Izq)
-            report.R3       = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3 (Central Der)
-            report.start    = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho)
-
-            // 7. MARCHAS DE LA PALANCA EN H
-            // Inyectamos la lectura del report_[2] directamente en la variable 'whatever[0]' 
-            // de la estructura original del G29, que es donde la consola espera las marchas.
-            // 0x01 = 1ª, 0x02 = 2ª, 0x04 = 3ª, 0x08 = 4ª, 0x10 = 5ª, 0x20 = 6ª, 0x40 = Reversa
-            report.whatever[0] = report_[2] & 0x7F;
+            // Botones rojos ordenados rigurosamente de izquierda a derecha: select, L3, R3, start
+            report.L3       = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 1 (Izquierdo) -> Envía SELECT
+            report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2 (Central Izquierdo) -> Envía L3
+            report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3 (Central Derecho) -> Envía R3
+            report.select   = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho) -> Envía START
         }
     }
 
