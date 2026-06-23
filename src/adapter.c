@@ -38,7 +38,7 @@ enum {
 uint8_t state = IDLE;
 
 bool initialized = true;
-bool calibration_done = false; // Bloqueo de FFB durante calibración
+bool calibration_done = false; // Bloqueador de paquetes FFB mientras calibra
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -81,7 +81,7 @@ void hid_task() {
         memcpy(&prev_report, &report, sizeof(report));
     }
 
-    // Solo reenvía comandos de Force Feedback si la calibración ha concluido
+    // Solo reenviar paquetes de vibración del juego si el volante ha terminado su calibración
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
         if (wheel_device && calibration_done) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
@@ -91,19 +91,17 @@ void hid_task() {
 }
 
 void wheel_init_task() {
-    static uint32_t last_send_time = 0;
     static uint32_t c299_mount_time = 0;
     uint32_t current_time = board_millis();
 
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
             calibration_done = false;
-            if (current_time - last_send_time >= 1500) {
-                last_send_time = current_time;
-                static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
-                printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10)...\n");
-                tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
-            }
+            // Mutación instantánea (0ms) para evitar que empiece a calibrarse en el modo DF (C294)
+            static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10) de forma inmediata...\n");
+            tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
+            wheel_pid = 0; // Evita re-envíos
         } 
         else if (wheel_pid == 0xc299) {
             if (!initialized) {
@@ -112,14 +110,14 @@ void wheel_init_task() {
                 c299_mount_time = current_time;
                 printf("\n========================================================\n");
                 printf(" [OK] VOLANTE G25 DETECTADO EN MODO NATIVO (C299)\n");
-                printf(" Iniciando auto-calibrado físico libre de FFB. Esperando 6s...\n");
+                printf(" Iniciando auto-calibrado físico continuo. Esperando 6s...\n");
                 printf("========================================================\n\n");
             }
 
-            // Transcurridos los 6 segundos, el volante ya se ha centrado de forma natural
+            // Esperar 6 segundos para dar tiempo a que termine de girar y centrarse por completo
             if (!calibration_done && (current_time - c299_mount_time >= 6000)) {
-                calibration_done = true; // Desbloquea el paso de datos FFB
-                printf("[WHEEL] Calibrado completado. Activando actuadores y suavizado...\n");
+                calibration_done = true; // Desbloquea los efectos de fuerza de los juegos
+                printf("[WHEEL] Calibrado completado sin interrupciones. Motores desbloqueados.\n");
                 static uint8_t buf[] = { 0xf5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 tuh_hid_send_report(wheel_device, wheel_instance, 0, buf, sizeof(buf));
                 tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, buf, sizeof(buf));
@@ -343,17 +341,18 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         } 
         else if (wheel_pid == 0xc299) {
             // =================================================================
-            // DETECCIÓN Y MAPEO EN MODO NATIVO G25 (C299) -> SALIDA G29
+            // DETECCIÓN Y MAPEO EN MODO NATIVO G25 (C299) -> TRADUCCIÓN A G29
             // =================================================================
 
             // 1. DIRECCIÓN
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES (Filtro para evitar oscilaciones parásitas en embrague)
+            // 2. PEDALES DE CARRERA (0xFF en reposo, 0x00 pisado)
             report.throttle = report_[5] << 8;
             report.brake    = report_[6] << 8;
 
+            // Embrague: filtrado de oscilaciones parásitas
             if (report_[7] >= 0xF5) {
                 report.clutch = 0xFF00; // En reposo (suelto)
             } else {
@@ -376,15 +375,21 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo físico actúa como R2
             report.L2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho físico actúa como L2
 
-            // 6. BOTONES ROJOS (Orden exacto de izquierda a derecha solicitado: start, select, L3, R3)
-            report.start    = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 1 (Izquierdo, 0x80) -> START
-            report.select   = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 2 (Central Izquierdo, 0x40) -> SELECT
-            report.L3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 3 (Central Derecho, 0x20) -> L3
-            report.R3       = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 4 (Derecho, 0x10) -> R3
+            // 6. BOTONES ROJOS (Orden físico de izquierda a derecha mapeado a: select, L3, R3, start)
+            report.select   = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 1 (Izquierdo, 0x80) -> SELECT
+            report.L3       = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 2 (Central Izquierdo, 0x10) -> L3
+            report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 3 (Central Derecho, 0x20) -> R3
+            report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
 
-            // 7. TRADUCCIÓN DE LA PALANCA DE CAMBIOS EN H (Hacia Byte 7 de G29 emulado)
-            // Copia directa del estado de marchas del G25 (report_[2], bits 0 al 6) al Byte 7 de G29 (report.whatever[0])
-            report.whatever[0] = report_[2] & 0x7F;
+            // 7. PALANCA DE CAMBIOS EN PATRÓN H (Botones estándar 15 al 21 en G29)
+            uint8_t gears = report_[2];
+            report.gear_1  = (gears & 0x01) ? 1 : 0; // Marcha 1
+            report.gear_2  = (gears & 0x02) ? 1 : 0; // Marcha 2
+            report.gear_3  = (gears & 0x04) ? 1 : 0; // Marcha 3
+            report.gear_4  = (gears & 0x08) ? 1 : 0; // Marcha 4
+            report.gear_5  = (gears & 0x10) ? 1 : 0; // Marcha 5
+            report.gear_6  = (gears & 0x20) ? 1 : 0; // Marcha 6
+            report.reverse = (gears & 0x40) ? 1 : 0; // Marcha Atrás
         }
     }
 
