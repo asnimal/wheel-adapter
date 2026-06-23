@@ -43,7 +43,6 @@ uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 g29_report_t report;
 g29_report_t prev_report;
 
-// G29 Descriptor de simulación para PS5
 const uint8_t output_0x03[] = {
     0x21, 0x27, 0x03, 0x11, 0x06, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -73,6 +72,11 @@ void hid_task() {
     // Combinación física real para el botón PS (L3 + R3)
     report.PS = report.L3 && report.R3;
 
+    // DEBUG: Avisar por Putty cuando se active el botón PS
+    if (report.PS && !prev_report.PS) {
+        printf("[DEBUG] ¡L3+R3 detectados! Botón PS activado y enviado a PS5.\n");
+    }
+
     if (memcmp(&prev_report, &report, sizeof(report))) {
         tud_hid_report(1, &report, sizeof(report));
         memcpy(&prev_report, &report, sizeof(report));
@@ -94,7 +98,6 @@ void wheel_init_task() {
         if (wheel_pid == 0xc294) {
             if (current_time - last_send_time >= 1500) {
                 last_send_time = current_time;
-                // Comando único y estricto hacia modo nativo G25
                 static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
                 printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10)...\n");
                 tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
@@ -105,8 +108,6 @@ void wheel_init_task() {
             printf("\n========================================================\n");
             printf(" [OK] ¡VOLANTE EN MODO NATIVO G25 (C299) CONFIGURADO!\n");
             printf("========================================================\n");
-            
-            // ELIMINADO EL ENVIO DE 0xF5 PARA PERMITIR EL AUTO-CALIBRADO NATIVO
         }
     }
 }
@@ -114,8 +115,7 @@ void wheel_init_task() {
 void auth_task() {
     if (!busy && auth_device) {
         switch (state) {
-            case IDLE:
-                break;
+            case IDLE: break;
             case SENDING_RESET:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
@@ -166,9 +166,7 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
     if (dev_addr == auth_device) {
         busy = false;
         switch (report_id) {
-            case 0xF3:
-                state = SENDING_NONCE;
-                break;
+            case 0xF3: state = SENDING_NONCE; break;
             case 0xF2:
                 if (get_buffer[2] == 0) {
                     signature_part = 0;
@@ -238,9 +236,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        if (part > 4) {
-            return;
-        }
+        if (part > 4) return;
         expected_part = part + 1;
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
@@ -294,7 +290,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     uint32_t now = board_millis();
 
     if (len > 0 && dev_addr == wheel_device) {
-        // LIMITADOR DE LOG: Evita que el timestamp inunde Putty (Imprime cada 300ms)
         if (now - last_print_time >= 300) {
             printf("[DATA C299] ");
             for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
@@ -323,10 +318,6 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start    = df->R3;
         }
         else if (wheel_pid == 0xc299) {
-            // =================================================================
-            // DETECCIÓN CORRECTA Y LIMPIA DEL MAPA DE MEMORIA NATIVO G25 (C299)
-            // =================================================================
-            
             // 1. EJE DE DIRECCIÓN
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
@@ -336,9 +327,9 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.brake    = report_[6] << 8;
             
             if (report_[7] >= 0xF5) {
-                report.clutch = 0xFF00; // Totalmente suelto en reposo
+                report.clutch = 0xFF00;
             } else {
-                report.clutch = report_[7] << 8; // Escalado progresivo
+                report.clutch = report_[7] << 8;
             }
 
             // 3. CRUCETA (D-PAD)
@@ -356,19 +347,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2       = (report_[1] & 0x04) ? 1 : 0; 
             report.L2       = (report_[1] & 0x08) ? 1 : 0; 
 
-            // =================================================================
-            // 5. BOTONES ROJOS (CORREGIDO: Orden físico real de izquierda a derecha)
-            // El hardware envía 0x10 para el botón más a la izquierda.
-            // =================================================================
-            report.select   = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 1 (Izquierdo)
-            report.L3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 2
-            report.R3       = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 3
-            report.start    = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 4 (Derecho)
+            // 5. BOTONES ROJOS (Orden físico real de izquierda a derecha)
+            report.select   = (report_[1] & 0x10) ? 1 : 0; 
+            report.L3       = (report_[1] & 0x20) ? 1 : 0; 
+            report.R3       = (report_[1] & 0x40) ? 1 : 0; 
+            report.start    = (report_[1] & 0x80) ? 1 : 0; 
 
-            // =================================================================
             // 6. PALANCA DE CAMBIOS (H-PATTERN)
-            // El Byte 2 (report_[2]) contiene el estado de las marchas.
-            // =================================================================
             uint8_t shifter = report_[2];
             report.gear1 = (shifter & 0x01) ? 1 : 0;
             report.gear2 = (shifter & 0x02) ? 1 : 0;
@@ -377,6 +362,11 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.gear5 = (shifter & 0x10) ? 1 : 0;
             report.gear6 = (shifter & 0x20) ? 1 : 0;
             report.gearR = (shifter & 0x40) ? 1 : 0;
+
+            // DEBUG: Avisar por Putty cuando se meta una marcha
+            if (shifter > 0) {
+                printf("[DEBUG] Marcha detectada en Byte 2: 0x%02X\n", shifter);
+            }
         }
     }
     tuh_hid_receive_report(dev_addr, instance);
