@@ -286,7 +286,9 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
-        printf("[AUTH] Mando original asignado.\n");
+        // KEEPALIVE ACTIVADO: Iniciamos el sondeo de actividad continuo del mando original para evitar la suspensión.
+        tuh_hid_receive_report(dev_addr, instance);
+        printf("[AUTH] Mando original asignado. Iniciando Keep-Alive de actividad...\n");
     }
 }
 
