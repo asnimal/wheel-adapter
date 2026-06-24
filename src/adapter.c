@@ -38,7 +38,7 @@ enum {
 uint8_t state = IDLE;
 
 bool initialized = true;
-bool calibration_done = false; // Bloquea FFB durante calibración
+bool calibration_done = false; // Bloquea FFB de la consola mientras realiza la calibración
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -105,7 +105,7 @@ void wheel_init_task() {
         else if (wheel_pid == 0xc299) {
             if (!initialized) {
                 initialized = true;
-                calibration_done = false; // Bloquea FFB de la consola mientras realiza la calibración
+                calibration_done = false; // Bloquea FFB mientras se realiza el auto-giro
                 c299_mount_time = current_time;
                 printf("\n========================================================\n");
                 printf(" [OK] VOLANTE G25 DETECTADO EN MODO NATIVO (C299)\n");
@@ -374,19 +374,19 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo físico actúa como R2
             report.L2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho físico actúa como L2
 
-            // 6. BOTONES ROJOS (De izquierda a derecha ordenados exactamente: select, L3, R3, start)
+            // 6. TRADUCCIÓN DE BOTONES ROJOS Y PALANCA EN MODO SECUENCIAL / H-PATTERN
+            // - Mapeo de botones rojos físicos de la botonera:
             report.select   = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 1 (Izquierdo, 0x80) -> SELECT
-            report.L3       = (report_[1] & 0x10) ? 1 : 0; // Botón rojo 2 (Central Izquierdo, 0x10) -> L3
-            report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 3 (Central Derecho, 0x20) -> R3
             report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
 
-            // 7. TRADUCCIÓN MULTI-BYTE DE LA PALANCA DE CAMBIOS
-            // Duplicamos las señales limpias de marchas en los tres bytes posibles de mapeo G29 (Bytes 7, 12 y 15).
-            // Esto asegura compatibilidad absoluta e instantánea en todos los juegos de PS5.
-            uint8_t gears_clean = report_[2] & 0x7F;
-            report.whatever[0] = gears_clean; // Byte 7 (Extra buttons / Dials)
-            report.whatever[5] = gears_clean; // Byte 12 (Logitech Shifter Standard)
-            report.whatever[8] = gears_clean; // Byte 15 (Logitech Shifter Alt)
+            // - Doble compatibilidad para L3 y R3:
+            // L3 se activa con el Botón Rojo 2 (0x10) O empujando la palanca secuencial (0x81) O en 1ª marcha de patrón H (0x01)
+            bool push_forward = (report_[2] == 0x81) || (report_[2] == 0x01);
+            report.L3       = ((report_[1] & 0x10) || push_forward) ? 1 : 0;
+
+            // R3 se activa con el Botón Rojo 3 (0x20) O tirando de la palanca secuencial (0x82) O en 2ª marcha de patrón H (0x02)
+            bool pull_backward = (report_[2] == 0x82) || (report_[2] == 0x02);
+            report.R3       = ((report_[1] & 0x20) || pull_backward) ? 1 : 0;
         }
     }
 
