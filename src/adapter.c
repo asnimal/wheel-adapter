@@ -38,7 +38,7 @@ enum {
 uint8_t state = IDLE;
 
 bool initialized = true;
-bool calibration_done = false; // Bloquea FFB de la consola mientras realiza la calibración
+bool calibration_done = false; // Bloquea FFB durante calibración
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -81,7 +81,6 @@ void hid_task() {
         memcpy(&prev_report, &report, sizeof(report));
     }
 
-    // Solo reenviar paquetes de vibración del juego si el volante ha terminado su calibración
     if (memcmp(prev_ff_buf, ff_buf, sizeof(ff_buf))) {
         if (wheel_device && calibration_done) {
             tuh_hid_send_report(wheel_device, wheel_instance, 0, ff_buf, sizeof(ff_buf));
@@ -97,7 +96,7 @@ void wheel_init_task() {
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
             calibration_done = false;
-            // Mutación instantánea (0ms) para evitar que empiece a calibrarse en el modo DF (C294)
+            // Forzar de forma instantánea e inmediata la conmutación al arrancar
             static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
             printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10) de forma inmediata...\n");
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
@@ -310,8 +309,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 
     if (len > 0 && dev_addr == wheel_device) {
         
-        // FILTRADO INTELIGENTE DE LOG: Compara los primeros 8 bytes (botones, cruceta, marchas, volante y pedales)
-        // Ignora los bytes 8 y 9 (sensores analógicos de la palanca) para evitar inundar Putty con ruido eléctrico.
+        // FILTRADO DE LOG OPTIMIZADO: Monitorea botones, marchas, volante y pedales (primeros 8 bytes).
+        // Ignora las oscilaciones analógicas de la palanca (bytes 8 y 9) para evitar inundar Putty con ruido eléctrico.
         if (memcmp(prev_filtered_state, report_, 8) != 0) {
             printf("[DATA G25] ");
             for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
@@ -381,15 +380,9 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 3 (Central Derecho, 0x20) -> R3
             report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
 
-            // 7. PALANCA DE CAMBIOS EN PATRÓN H (Mapeados a los botones estándar 13 al 19 del G29)
-            uint8_t gears = report_[2];
-            report.gear_1  = (gears & 0x01) ? 1 : 0; // Marcha 1
-            report.gear_2  = (gears & 0x02) ? 1 : 0; // Marcha 2
-            report.gear_3  = (gears & 0x04) ? 1 : 0; // Marcha 3 (o empujar palanca en modo secuencial)
-            report.gear_4  = (gears & 0x08) ? 1 : 0; // Marcha 4 (o tirar palanca en modo secuencial)
-            report.gear_5  = (gears & 0x10) ? 1 : 0; // Marcha 5
-            report.gear_6  = (gears & 0x20) ? 1 : 0; // Marcha 6
-            report.reverse = (gears & 0x40) ? 1 : 0; // Marcha Atrás
+            // 7. TRADUCCIÓN DE LA PALANCA DE CAMBIOS (Enviada en el espacio de memoria del fabricante de G29)
+            // Copiamos el byte de marchas report_[2] (bits 0 al 6) directamente al primer byte vendor de G29 (whatever[0])
+            report.whatever[0] = report_[2] & 0x7F;
         }
     }
 
