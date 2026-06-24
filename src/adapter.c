@@ -38,7 +38,7 @@ enum {
 uint8_t state = IDLE;
 
 bool initialized = true;
-bool calibration_done = false; // Bloquea FFB durante calibración
+bool calibration_done = false; // Bloquea FFB de la consola mientras realiza la calibración
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -96,7 +96,7 @@ void wheel_init_task() {
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
             calibration_done = false;
-            // Forzar de forma instantánea e inmediata la conmutación al arrancar
+            // Mutación instantánea (0ms) para evitar que empiece a calibrarse en el modo DF (C294)
             static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
             printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10) de forma inmediata...\n");
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
@@ -381,8 +381,8 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
 
             // 7. TRADUCCIÓN DE LA PALANCA DE CAMBIOS (Enviada en el espacio de memoria del fabricante de G29)
-            // Copiamos el byte de marchas report_[2] (bits 0 al 6) directamente al primer byte vendor de G29 (whatever[0])
-            report.whatever[0] = report_[2] & 0x7F;
+            // Copiamos el byte de marchas report_[2] (bits 0 al 6) directamente al Byte 12 de G29 (whatever[5])
+            report.whatever[5] = report_[2] & 0x7F;
         }
     }
 
