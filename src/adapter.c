@@ -38,7 +38,7 @@ enum {
 uint8_t state = IDLE;
 
 bool initialized = true;
-bool calibration_done = false; // Bloquea FFB de la consola mientras realiza la calibración
+bool calibration_done = false; // Bloquea FFB durante calibración
 
 uint8_t get_buffer[64];
 uint8_t set_buffer[64];
@@ -96,7 +96,7 @@ void wheel_init_task() {
     if (wheel_device) {
         if (wheel_pid == 0xc294) {
             calibration_done = false;
-            // Mutación instantánea (0ms) para evitar que empiece a calibrarse en el modo DF (C294)
+            // Mutación instantánea para evitar calibración previa en modo DF (C294)
             static uint8_t cmd_g25_native[] = { 0xf8, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
             printf("[WHEEL] Estado C294 -> Forzando mutacion estricta a G25 Nativo (0xF8 0x10) de forma inmediata...\n");
             tuh_hid_set_report(wheel_device, wheel_instance, 0, HID_REPORT_TYPE_OUTPUT, cmd_g25_native, sizeof(cmd_g25_native));
@@ -105,7 +105,7 @@ void wheel_init_task() {
         else if (wheel_pid == 0xc299) {
             if (!initialized) {
                 initialized = true;
-                calibration_done = false; // Bloquea FFB mientras se realiza el auto-giro
+                calibration_done = false; // Bloquea FFB de la consola mientras realiza la calibración
                 c299_mount_time = current_time;
                 printf("\n========================================================\n");
                 printf(" [OK] VOLANTE G25 DETECTADO EN MODO NATIVO (C299)\n");
@@ -380,9 +380,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón rojo 3 (Central Derecho, 0x20) -> R3
             report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
 
-            // 7. TRADUCCIÓN DE LA PALANCA DE CAMBIOS (Enviada en el espacio de memoria del fabricante de G29)
-            // Copiamos el byte de marchas report_[2] (bits 0 al 6) directamente al Byte 12 de G29 (whatever[5])
-            report.whatever[5] = report_[2] & 0x7F;
+            // 7. TRADUCCIÓN MULTI-BYTE DE LA PALANCA DE CAMBIOS
+            // Duplicamos las señales limpias de marchas en los tres bytes posibles de mapeo G29 (Bytes 7, 12 y 15).
+            // Esto asegura compatibilidad absoluta e instantánea en todos los juegos de PS5.
+            uint8_t gears_clean = report_[2] & 0x7F;
+            report.whatever[0] = gears_clean; // Byte 7 (Extra buttons / Dials)
+            report.whatever[5] = gears_clean; // Byte 12 (Logitech Shifter Standard)
+            report.whatever[8] = gears_clean; // Byte 15 (Logitech Shifter Alt)
         }
     }
 
