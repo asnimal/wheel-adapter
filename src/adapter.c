@@ -8,7 +8,7 @@
 
 #include "reports.h"
 
-// Alineación estricta de hardware a bloques de 4 bytes para todos los búferes de transmisión USB
+// Alineación de hardware a bloques de 4 bytes para todos los búferes de transmisión USB
 CFG_TUSB_MEM_ALIGN uint8_t nonce[280];
 CFG_TUSB_MEM_ALIGN uint8_t signature[1064];
 CFG_TUSB_MEM_ALIGN uint8_t get_buffer[64];
@@ -27,7 +27,8 @@ uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
-uint32_t auth_timer = 0; // Temporizador para evitar el bloqueo de autenticación
+uint32_t auth_timer = 0;             // Temporizador para evitar el bloqueo de autenticación
+uint32_t last_wheel_report_time = 0; // Temporizador para el Watchdog del volante G25
 
 enum {
     IDLE = 0,
@@ -74,6 +75,13 @@ void report_init() {
 void hid_task() {
     if (!tud_hid_ready()) {
         return;
+    }
+
+    // WATCHDOG DE AUTO-RECUPERACIÓN: Si el volante no responde tras 100ms, forzamos la reactivación del sondeo
+    uint32_t current_time = board_millis();
+    if (wheel_device && (current_time - last_wheel_report_time >= 100)) {
+        last_wheel_report_time = current_time;
+        tuh_hid_receive_report(wheel_device, wheel_instance);
     }
 
     // Combinación física real para el botón PS (L3 + R3)
@@ -124,7 +132,7 @@ void auth_task() {
 
     uint32_t current_time = board_millis();
 
-    // Sistema de auto-recuperación ante pérdida de paquetes con reporte en log de telemetría
+    // Sistema de auto-recuperación ante pérdida de paquetes con reporte en log de telemetría (2000ms)
     if (busy && (current_time - auth_timer >= 2000)) {
         printf("[AUTH @ %u ms] !!! TIMEOUT DETECTADO !!! Estado: %d | Nonce Part: %d | Sig Part: %d. Reintentando...\n", 
                current_time, state, nonce_part, signature_part);
@@ -178,7 +186,7 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
-    stdio_init_all(); // Habilita de nuevo la salida serial de Putty
+    stdio_init_all(); // Mantenemos la salida serial para monitorear posibles anomalías
     tusb_init();
 
     printf("\n========================================================\n");
@@ -211,7 +219,6 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                     signature_part = 0;
                     state = RECEIVING_SIG;
                 } else {
-                    // Si el mando sigue ocupado firmando, volvemos a preguntar en el próximo ciclo
                     state = WAITING_FOR_SIG;
                 }
                 break;
@@ -317,6 +324,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         wheel_device = dev_addr;
         wheel_instance = instance; 
         wheel_pid = pid;
+        last_wheel_report_time = board_millis(); // Inicializa el temporizador del Watchdog
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
         calibration_done = false;
@@ -340,7 +348,20 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
+    static uint8_t prev_filtered_state[8] = {0};
+
     if (len > 0 && dev_addr == wheel_device) {
+        // Marcamos la hora del último reporte analógico recibido con éxito del volante
+        last_wheel_report_time = board_millis();
+
+        // Monitor de log para Putty
+        if (memcmp(prev_filtered_state, report_, 8) != 0) {
+            printf("[DATA G25] ");
+            for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
+            printf("\n");
+            memcpy(prev_filtered_state, report_, 8);
+        }
+
         if (wheel_pid == 0xc294) {
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
