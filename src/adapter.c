@@ -6,7 +6,6 @@
 #include "tusb.h"
 
 #include "pico/stdio.h"
-#include "pico/multicore.h" // Librería oficial para activar el segundo núcleo
 
 #include "reports.h"
 
@@ -27,6 +26,7 @@ uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
+uint32_t auth_timer = 0; // Temporizador para evitar el bloqueo de autenticación
 
 enum {
     IDLE = 0,
@@ -68,14 +68,6 @@ void report_init() {
     report.ry = 0x80;
     report.clutch = 0xFFFF;
     memcpy(&prev_report, &report, sizeof(report));
-}
-
-// HILO DE EJECUCIÓN DEL CORE 1: Encargado exclusivo de gestionar el tráfico USB Host (G25 e Hori)
-void core1_entry() {
-    tusb_init(); // Inicializa el stack USB en este núcleo
-    while (1) {
-        tuh_task(); // Procesa de forma ininterrumpida la lectura de dispositivos USB
-    }
 }
 
 void hid_task() {
@@ -135,13 +127,30 @@ void wheel_init_task() {
 }
 
 void auth_task() {
-    if (!busy && auth_device) {
+    if (!auth_device) return;
+
+    uint32_t current_time = board_millis();
+
+    // SISTEMA DE AUTO-RECUPERACIÓN: Si una transferencia con el mando falla, la liberamos tras 500ms y reintentamos.
+    if (busy && (current_time - auth_timer >= 500)) {
+        printf("[AUTH] Timeout de respuesta detectado. Reintentando paso actual...\n");
+        busy = false;
+        if (state == SENDING_NONCE && nonce_part > 0) {
+            nonce_part--; // Reintenta el último fragmento de nonce
+        }
+        if (state == RECEIVING_SIG && signature_part > 0) {
+            signature_part--; // Reintenta el último fragmento de firma
+        }
+    }
+
+    if (!busy) {
         switch (state) {
             case IDLE:
                 break;
             case SENDING_RESET:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
+                auth_timer = current_time;
                 break;
             case SENDING_NONCE:
                 set_buffer[0] = 0xF0;
@@ -151,35 +160,36 @@ void auth_task() {
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
+                auth_timer = current_time;
                 nonce_part++;
                 break;
             case WAITING_FOR_SIG:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
                 busy = true;
+                auth_timer = current_time;
                 break;
             case RECEIVING_SIG:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
                 busy = true;
+                auth_timer = current_time;
                 break;
         }
     }
 }
 
-// MAIN SE EJECUTA EXCLUSIVAMENTE EN EL CORE 0
 int main() {
     board_init();
     report_init();
+    tusb_init(); // Inicializa el stack USB de manera segura en un solo núcleo
     stdio_init_all();
 
     printf("\n==================================================\n");
     printf("        SISTEMA DE TRADUCCIÓN G25 NATIVO (C299)     \n");
     printf("==================================================\n");
 
-    // Lanza de forma asíncrona la ejecución del Core 1
-    multicore_launch_core1(core1_entry);
-
     while (1) {
-        tud_task(); // Procesa la comunicación USB Device hacia la consola PS5
+        tuh_task(); // Procesa el puerto USB Host
+        tud_task(); // Procesa el puerto hacia la consola
         hid_task();
         auth_task();
         wheel_init_task();
@@ -298,9 +308,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
-        // El mando de autenticación se deja en modo silencioso (sin sondeo continuo de interrupción)
-        // para maximizar el ancho de banda del puerto USB Host durante la firma.
-        printf("[AUTH] Mando original asignado.\n");
+        printf("[AUTH] Mando original asignado en puerto seguro.\n");
     }
 }
 
