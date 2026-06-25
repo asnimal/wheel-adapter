@@ -122,14 +122,12 @@ void auth_task() {
 
     uint32_t current_time = board_millis();
 
-    // Sistema de auto-recuperación ante pérdida de paquetes (Timeout de 2000ms)
+    // Auto-recuperación ante pérdida de paquetes. Si falla, reanudamos el IDLE para no congelar el volante.
     if (busy && (current_time - auth_timer >= 2000)) {
         busy = false;
-        if (state == SENDING_NONCE && nonce_part > 0) {
-            nonce_part--; 
-        }
-        if (state == RECEIVING_SIG && signature_part > 0) {
-            signature_part--; 
+        state = IDLE;
+        if (wheel_device) {
+            tuh_hid_receive_report(wheel_device, wheel_instance);
         }
     }
 
@@ -150,8 +148,8 @@ void auth_task() {
                 memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
                 tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
                 busy = true;
-                auth_timer = current_time;
                 nonce_part++;
+                auth_timer = current_time;
                 break;
             case WAITING_FOR_SIG:
                 tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
@@ -170,7 +168,7 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
-    tusb_init(); // Inicializa los servicios USB
+    tusb_init();
 
     while (1) {
         tuh_task();
@@ -204,6 +202,10 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                     expected_part = 0;
                     signature_ready = true;
                     signature_part = 0;
+                    // REANUDACIÓN DE TRÁFICO: Firma descargada con éxito. Reanudamos el sondeo del volante de inmediato.
+                    if (wheel_device) {
+                        tuh_hid_receive_report(wheel_device, wheel_instance);
+                    }
                 }
                 break;
         }
@@ -264,6 +266,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         expected_part = part + 1;
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
+            // DETENCIÓN DE TRÁFICO: La consola inicia la firma. Pausamos el sondeo del volante para vaciar el bus USB.
             state = SENDING_RESET;
             nonce_part = 0;
         }
@@ -378,15 +381,18 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.select   = (report_[1] & 0x80) ? 1 : 0; 
             report.start    = (report_[1] & 0x40) ? 1 : 0; 
 
-            // L3 (Botón rojo 2 O palanca hacia adelante en secuencial/1ª marcha)
+            // L3 (Botón rojo 2 OR palanca hacia adelante en secuencial/1ª marcha)
             bool push_forward = (report_[2] == 0x81) || (report_[2] == 0x01);
             report.L3       = ((report_[1] & 0x10) || push_forward) ? 1 : 0;
 
-            // R3 (Botón rojo 3 O palanca hacia atrás en secuencial/2ª marcha)
+            // R3 (Botón rojo 3 OR palanca hacia atrás en secuencial/2ª marcha)
             bool pull_backward = (report_[2] == 0x82) || (report_[2] == 0x02);
             report.R3       = ((report_[1] & 0x20) || pull_backward) ? 1 : 0;
         }
     }
 
-    tuh_hid_receive_report(dev_addr, instance);
+    // Solo pedimos el siguiente reporte de datos del volante si la consola no está realizando una autenticación activa
+    if (state == IDLE) {
+        tuh_hid_receive_report(dev_addr, instance);
+    }
 }
