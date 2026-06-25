@@ -6,6 +6,7 @@
 #include "tusb.h"
 
 #include "pico/stdio.h"
+#include "pico/multicore.h" // Librería oficial para activar el segundo núcleo
 
 #include "reports.h"
 
@@ -67,6 +68,14 @@ void report_init() {
     report.ry = 0x80;
     report.clutch = 0xFFFF;
     memcpy(&prev_report, &report, sizeof(report));
+}
+
+// HILO DE EJECUCIÓN DEL CORE 1: Encargado exclusivo de gestionar el tráfico USB Host (G25 e Hori)
+void core1_entry() {
+    tusb_init(); // Inicializa el stack USB en este núcleo
+    while (1) {
+        tuh_task(); // Procesa de forma ininterrumpida la lectura de dispositivos USB
+    }
 }
 
 void hid_task() {
@@ -156,18 +165,21 @@ void auth_task() {
     }
 }
 
+// MAIN SE EJECUTA EXCLUSIVAMENTE EN EL CORE 0
 int main() {
     board_init();
     report_init();
-    tusb_init();
     stdio_init_all();
 
     printf("\n==================================================\n");
     printf("        SISTEMA DE TRADUCCIÓN G25 NATIVO (C299)     \n");
     printf("==================================================\n");
+
+    // Lanza de forma asíncrona la ejecución del Core 1
+    multicore_launch_core1(core1_entry);
+
     while (1) {
-        tuh_task();
-        tud_task();
+        tud_task(); // Procesa la comunicación USB Device hacia la consola PS5
         hid_task();
         auth_task();
         wheel_init_task();
@@ -286,9 +298,9 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
     } else {  
         auth_device = dev_addr;
         auth_instance = instance;
-        // KEEPALIVE ACTIVADO: Iniciamos el sondeo de actividad continuo del mando original para evitar la suspensión.
-        tuh_hid_receive_report(dev_addr, instance);
-        printf("[AUTH] Mando original asignado. Iniciando Keep-Alive de actividad...\n");
+        // El mando de autenticación se deja en modo silencioso (sin sondeo continuo de interrupción)
+        // para maximizar el ancho de banda del puerto USB Host durante la firma.
+        printf("[AUTH] Mando original asignado.\n");
     }
 }
 
