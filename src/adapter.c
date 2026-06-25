@@ -6,13 +6,16 @@
 
 #include "reports.h"
 
+// Alineación estricta de hardware a bloques de 4 bytes para todos los búferes de transmisión USB
+CFG_TUSB_MEM_ALIGN uint8_t nonce[280];
+CFG_TUSB_MEM_ALIGN uint8_t signature[1064];
+CFG_TUSB_MEM_ALIGN uint8_t get_buffer[64];
+CFG_TUSB_MEM_ALIGN uint8_t set_buffer[64];
+
 uint8_t nonce_id;
-uint8_t nonce[280];
 uint8_t nonce_part = 0;
-uint8_t signature[1064];
 uint8_t signature_part = 0;
 uint8_t signature_ready = 0;
-
 uint8_t expected_part = 0;
 
 uint8_t wheel_device = 0;
@@ -37,13 +40,11 @@ uint8_t state = IDLE;
 bool initialized = true;
 bool calibration_done = false;
 
-uint8_t get_buffer[64];
-uint8_t set_buffer[64];
-uint8_t ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+CFG_TUSB_MEM_ALIGN uint8_t ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+CFG_TUSB_MEM_ALIGN uint8_t prev_ff_buf[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
-g29_report_t report;
-g29_report_t prev_report;
+CFG_TUSB_MEM_ALIGN g29_report_t report;
+CFG_TUSB_MEM_ALIGN g29_report_t prev_report;
 
 // G29 Descriptor de simulación para PS5
 const uint8_t output_0x03[] = {
@@ -121,7 +122,7 @@ void auth_task() {
 
     uint32_t current_time = board_millis();
 
-    // AUTO-RECUPERACIÓN: Ampliado a 2000ms para respetar el tiempo de firma física del chip del mando Hori
+    // Sistema de auto-recuperación ante pérdida de paquetes (Timeout de 2000ms)
     if (busy && (current_time - auth_timer >= 2000)) {
         busy = false;
         if (state == SENDING_NONCE && nonce_part > 0) {
@@ -169,7 +170,7 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
-    tusb_init(); // Inicialización directa y limpia de bus USB
+    tusb_init(); // Inicializa los servicios USB
 
     while (1) {
         tuh_task();
@@ -335,22 +336,22 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES DE CARRERA CON SILENCIADOR DE RUIDO ANALÓGICO
-            // Acelerador: filtro de reposo (0xFF es reposo suelto)
+            // 2. PEDALES DE CARRERA CON FILTRADO COMPLETO DE RUIDO ANALÓGICO
+            // Acelerador
             if (report_[5] >= 0xFA) {
                 report.throttle = 0xFFFF;
             } else {
                 report.throttle = report_[5] << 8;
             }
 
-            // Freno: filtro de reposo
+            // Freno
             if (report_[6] >= 0xFA) {
                 report.brake = 0xFFFF;
             } else {
                 report.brake = report_[6] << 8;
             }
 
-            // Embrague: filtro de reposo
+            // Embrague
             if (report_[7] >= 0xFA) {
                 report.clutch = 0xFFFF; 
             } else {
@@ -377,11 +378,11 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.select   = (report_[1] & 0x80) ? 1 : 0; 
             report.start    = (report_[1] & 0x40) ? 1 : 0; 
 
-            // L3 (Botón rojo 2 OR palanca hacia adelante en secuencial/1ª marcha)
+            // L3 (Botón rojo 2 O palanca hacia adelante en secuencial/1ª marcha)
             bool push_forward = (report_[2] == 0x81) || (report_[2] == 0x01);
             report.L3       = ((report_[1] & 0x10) || push_forward) ? 1 : 0;
 
-            // R3 (Botón rojo 3 OR palanca hacia atrás en secuencial/2ª marcha)
+            // R3 (Botón rojo 3 O palanca hacia atrás en secuencial/2ª marcha)
             bool pull_backward = (report_[2] == 0x82) || (report_[2] == 0x02);
             report.R3       = ((report_[1] & 0x20) || pull_backward) ? 1 : 0;
         }
