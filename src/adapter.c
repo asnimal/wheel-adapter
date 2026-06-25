@@ -22,7 +22,7 @@ uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
-uint32_t auth_timer = 0;
+uint32_t auth_timer = 0; // Temporizador para evitar el bloqueo de autenticación
 
 enum {
     IDLE = 0,
@@ -62,6 +62,8 @@ void report_init() {
     report.ly = 0x80;
     report.rx = 0x80;
     report.ry = 0x80;
+    report.throttle = 0xFFFF;
+    report.brake = 0xFFFF;
     report.clutch = 0xFFFF;
     memcpy(&prev_report, &report, sizeof(report));
 }
@@ -119,8 +121,8 @@ void auth_task() {
 
     uint32_t current_time = board_millis();
 
-    // Sistema de auto-recuperación ante pérdida de paquetes
-    if (busy && (current_time - auth_timer >= 500)) {
+    // AUTO-RECUPERACIÓN: Ampliado a 2000ms para respetar el tiempo de firma física del chip del mando Hori
+    if (busy && (current_time - auth_timer >= 2000)) {
         busy = false;
         if (state == SENDING_NONCE && nonce_part > 0) {
             nonce_part--; 
@@ -167,11 +169,11 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
-    tusb_init(); // Inicializa los servicios USB de manera optimizada
+    tusb_init(); // Inicialización directa y limpia de bus USB
 
     while (1) {
-        tuh_task(); // Procesa la lectura del volante/mando
-        tud_task(); // Procesa la salida a la consola
+        tuh_task();
+        tud_task();
         hid_task();
         auth_task();
         wheel_init_task();
@@ -333,13 +335,24 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES DE CARRERA (0xFF en reposo, 0x00 pisado)
-            report.throttle = report_[5] << 8;
-            report.brake    = report_[6] << 8;
+            // 2. PEDALES DE CARRERA CON SILENCIADOR DE RUIDO ANALÓGICO
+            // Acelerador: filtro de reposo (0xFF es reposo suelto)
+            if (report_[5] >= 0xFA) {
+                report.throttle = 0xFFFF;
+            } else {
+                report.throttle = report_[5] << 8;
+            }
 
-            // Embrague: filtrado de ruido en reposo
-            if (report_[7] >= 0xF5) {
-                report.clutch = 0xFF00; 
+            // Freno: filtro de reposo
+            if (report_[6] >= 0xFA) {
+                report.brake = 0xFFFF;
+            } else {
+                report.brake = report_[6] << 8;
+            }
+
+            // Embrague: filtro de reposo
+            if (report_[7] >= 0xFA) {
+                report.clutch = 0xFFFF; 
             } else {
                 report.clutch = report_[7] << 8; 
             }
@@ -355,20 +368,20 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.triangle = (report_[0] & 0x80) ? 1 : 0; 
 
             // 5. BOTONES Y LEVAS DEL VOLANTE
-            report.R1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda física actúa como R1
-            report.L1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha física actúa como L1
-            report.R2       = (report_[1] & 0x04) ? 1 : 0; // Botón Izquierdo físico actúa como R2
-            report.L2       = (report_[1] & 0x08) ? 1 : 0; // Botón Derecho físico actúa como L2
+            report.R1       = (report_[1] & 0x01) ? 1 : 0; 
+            report.L1       = (report_[1] & 0x02) ? 1 : 0; 
+            report.R2       = (report_[1] & 0x04) ? 1 : 0; 
+            report.L2       = (report_[1] & 0x08) ? 1 : 0; 
 
             // 6. TRADUCCIÓN DE BOTONES ROJOS Y PALANCA EN MODO SECUENCIAL / H-PATTERN
-            report.select   = (report_[1] & 0x80) ? 1 : 0; // Botón rojo 1 (Izquierdo, 0x80) -> SELECT
-            report.start    = (report_[1] & 0x40) ? 1 : 0; // Botón rojo 4 (Derecho, 0x40) -> START
+            report.select   = (report_[1] & 0x80) ? 1 : 0; 
+            report.start    = (report_[1] & 0x40) ? 1 : 0; 
 
-            // L3 se activa con el Botón Rojo 2 (0x10) O empujando la palanca secuencial (0x81) O en 1ª marcha de patrón H (0x01)
+            // L3 (Botón rojo 2 OR palanca hacia adelante en secuencial/1ª marcha)
             bool push_forward = (report_[2] == 0x81) || (report_[2] == 0x01);
             report.L3       = ((report_[1] & 0x10) || push_forward) ? 1 : 0;
 
-            // R3 se activa con el Botón Rojo 3 (0x20) O tirando de la palanca secuencial (0x82) O en 2ª marcha de patrón H (0x02)
+            // R3 (Botón rojo 3 OR palanca hacia atrás en secuencial/2ª marcha)
             bool pull_backward = (report_[2] == 0x82) || (report_[2] == 0x02);
             report.R3       = ((report_[1] & 0x20) || pull_backward) ? 1 : 0;
         }
