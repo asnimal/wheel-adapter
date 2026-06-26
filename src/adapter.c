@@ -1,14 +1,12 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "bsp/board_api.h"
 #include "tusb.h"
-#include "pico/stdio.h"
 
 #include "reports.h"
 
-// Alineación de hardware a bloques de 4 bytes para todos los búferes de transmisión USB
+// Alineación estricta de hardware a bloques de 4 bytes para todos los búferes de transmisión USB
 CFG_TUSB_MEM_ALIGN uint8_t nonce[280];
 CFG_TUSB_MEM_ALIGN uint8_t signature[1064];
 CFG_TUSB_MEM_ALIGN uint8_t get_buffer[64];
@@ -77,7 +75,7 @@ void hid_task() {
         return;
     }
 
-    // WATCHDOG DE AUTO-RECUPERACIÓN: Si el volante no responde tras 100ms, forzamos la reactivación del sondeo
+    // Watchdog de auto-recuperación activa de datos del volante ante ruidos electromagnéticos
     uint32_t current_time = board_millis();
     if (wheel_device && (current_time - last_wheel_report_time >= 100)) {
         last_wheel_report_time = current_time;
@@ -132,10 +130,8 @@ void auth_task() {
 
     uint32_t current_time = board_millis();
 
-    // Sistema de auto-recuperación ante pérdida de paquetes con reporte en log de telemetría (2000ms)
+    // Sistema de auto-recuperación ante pérdida de paquetes (Timeout de 2000ms)
     if (busy && (current_time - auth_timer >= 2000)) {
-        printf("[AUTH @ %u ms] !!! TIMEOUT DETECTADO !!! Estado: %d | Nonce Part: %d | Sig Part: %d. Reintentando...\n", 
-               current_time, state, nonce_part, signature_part);
         busy = false;
         if (state == SENDING_NONCE && nonce_part > 0) {
             nonce_part--; 
@@ -150,13 +146,11 @@ void auth_task() {
             case IDLE:
                 break;
             case SENDING_RESET:
-                printf("[AUTH @ %u ms] Enviando peticion de Reset (F3) al mando...\n", current_time);
                 tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
                 busy = true;
                 auth_timer = current_time;
                 break;
             case SENDING_NONCE:
-                printf("[AUTH @ %u ms] Enviando fragmento Nonce %d/5 al mando...\n", current_time, nonce_part + 1);
                 set_buffer[0] = 0xF0;
                 set_buffer[1] = nonce_id;
                 set_buffer[2] = nonce_part;
@@ -168,13 +162,11 @@ void auth_task() {
                 nonce_part++;
                 break;
             case WAITING_FOR_SIG:
-                printf("[AUTH @ %u ms] Esperando firma criptografica del mando...\n", current_time);
                 tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
                 busy = true;
                 auth_timer = current_time;
                 break;
             case RECEIVING_SIG:
-                printf("[AUTH @ %u ms] Descargando fragmento Firma %d/19 desde el mando...\n", current_time, signature_part + 1);
                 tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
                 busy = true;
                 auth_timer = current_time;
@@ -186,12 +178,7 @@ void auth_task() {
 int main() {
     board_init();
     report_init();
-    stdio_init_all(); // Mantenemos la salida serial para monitorear posibles anomalías
-    tusb_init();
-
-    printf("\n========================================================\n");
-    printf("     TELEMETRÍA DE AUTENTICACIÓN INICIADA (MONO-CORE)\n");
-    printf("========================================================\n");
+    tusb_init(); // Inicializa el bus USB a máxima prioridad de hardware, sin canales de texto lentos
 
     while (1) {
         tuh_task();
@@ -206,16 +193,13 @@ int main() {
 
 void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t report_id, uint8_t report_type, uint16_t len) {
     if (dev_addr == auth_device) {
-        uint32_t current_time = board_millis();
         busy = false;
         switch (report_id) {
             case 0xF3:
-                printf("[AUTH @ %u ms] Reset confirmado por el mando Hori. Iniciando envio del Nonce.\n", current_time);
                 state = SENDING_NONCE;
                 break;
             case 0xF2:
                 if (get_buffer[2] == 0) {
-                    printf("[AUTH @ %u ms] El mando Hori confirma firma lista. Iniciando descarga.\n", current_time);
                     signature_part = 0;
                     state = RECEIVING_SIG;
                 } else {
@@ -226,7 +210,6 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
                 memcpy(signature + (signature_part * 56), get_buffer + 4, 56);
                 signature_part++;
                 if (signature_part == 19) {
-                    printf("[AUTH @ %u ms] Descarga completa. Firma criptografica lista en memoria de la Pico.\n", current_time);
                     state = IDLE;
                     expected_part = 0;
                     signature_ready = true;
@@ -241,10 +224,8 @@ void tuh_hid_get_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
 
 void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t report_id, uint8_t report_type, uint16_t len) {
     if ((dev_addr == auth_device) && (report_id == 0xF0)) {
-        uint32_t current_time = board_millis();
         busy = false;
         if (nonce_part == 5) {
-            printf("[AUTH @ %u ms] Nonce completo enviado al mando Hori. Esperando calculo...\n", current_time);
             state = WAITING_FOR_SIG;
         } else {
             state = SENDING_NONCE;
@@ -253,33 +234,28 @@ void tuh_hid_set_report_complete_cb(uint8_t dev_addr, uint8_t idx, uint8_t repor
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
-    uint32_t current_time = board_millis();
     switch (report_id) {
         case 0x03:
             memcpy(buffer, output_0x03, reqlen);
             board_led_write(false);
             return reqlen;
         case 0xF3:
-            printf("[AUTH @ %u ms] PS5 solicita estado de firma (Reset F3).\n", current_time);
             memcpy(buffer, output_0xf3, reqlen);
             signature_ready = false;
             return reqlen;
         case 0xF1: {  
-            printf("[AUTH @ %u ms] PS5 descarga fragmento Firma %d/19 desde la Pico.\n", current_time, signature_part + 1);
             buffer[0] = nonce_id;
             buffer[1] = signature_part;
             buffer[2] = 0;
             memcpy(&buffer[3], &signature[signature_part * 56], 56);
             signature_part++;
             if (signature_part == 19) {
-                printf("[AUTH @ %u ms] PS5 completo la lectura de la firma con exito.\n", current_time);
                 signature_part = 0;
                 board_led_write(true);
             }
             return reqlen;
         }
         case 0xF2: {  
-            printf("[AUTH @ %u ms] PS5 pregunta si la firma esta lista. Respuesta Pico: %s\n", current_time, signature_ready ? "LISTA (Ready)" : "OCUPADA (Busy)");
             buffer[0] = nonce_id;
             buffer[1] = signature_ready ? 0 : 16;
             memset(&buffer[2], 0, 9);
@@ -291,20 +267,17 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
     if (report_id == 0xF0) {  
-        uint32_t current_time = board_millis();
         uint8_t part = expected_part;
         if (bufsize == 63) {
             nonce_id = buffer[0];
             part = buffer[1];
         }
-        printf("[AUTH @ %u ms] PS5 envia fragmento Nonce %d/5 a la Pico.\n", current_time, part + 1);
         if (part > 4) {
             return;
         }
         expected_part = part + 1;
         memcpy(&nonce[part * 56], &buffer[3], 56);
         if (part == 4) {
-            printf("[AUTH @ %u ms] PS5 completo el envio del Nonce. Iniciando handshake con mando Hori...\n", current_time);
             state = SENDING_RESET;
             nonce_part = 0;
         }
@@ -348,19 +321,9 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
-    static uint8_t prev_filtered_state[8] = {0};
-
     if (len > 0 && dev_addr == wheel_device) {
-        // Marcamos la hora del último reporte analógico recibido con éxito del volante
+        // Marcamos la hora del último reporte de datos analógicos recibido con éxito del volante
         last_wheel_report_time = board_millis();
-
-        // Monitor de log para Putty
-        if (memcmp(prev_filtered_state, report_, 8) != 0) {
-            printf("[DATA G25] ");
-            for (uint16_t i = 0; i < len; i++) printf("%02X ", report_[i]);
-            printf("\n");
-            memcpy(prev_filtered_state, report_, 8);
-        }
 
         if (wheel_pid == 0xc294) {
             df_report_t* df = (df_report_t*) report_;
@@ -391,7 +354,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             uint16_t raw_steering = report_[3] | (report_[4] << 8);
             report.wheel = raw_steering;
 
-            // 2. PEDALES DE CARRERA CON FILTRADO COMPLETO DE RUIDO ANALÓGICO
+            // 2. PEDALES DE CARRERA CON FILTRADO COMPLETO DE RUIDO ANALÓGICO EN REPOSO
             // Acelerador
             if (report_[5] >= 0xFA) {
                 report.throttle = 0xFFFF;
