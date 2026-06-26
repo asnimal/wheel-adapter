@@ -6,7 +6,7 @@
 
 #include "reports.h"
 
-// Alineación estricta de hardware a bloques de 4 bytes para todos los búferes de transmisión USB
+// Búferes USB de ráfaga alineados por hardware a bloques de 4 bytes
 CFG_TUSB_MEM_ALIGN uint8_t nonce[280];
 CFG_TUSB_MEM_ALIGN uint8_t signature[1064];
 CFG_TUSB_MEM_ALIGN uint8_t get_buffer[64];
@@ -25,8 +25,6 @@ uint8_t auth_device = 0;
 uint8_t auth_instance = 0;
 
 bool busy = false;
-uint32_t auth_timer = 0;             // Temporizador para evitar el bloqueo de autenticación
-uint32_t last_wheel_report_time = 0; // Temporizador para el Watchdog del volante G25
 
 enum {
     IDLE = 0,
@@ -75,13 +73,6 @@ void hid_task() {
         return;
     }
 
-    // Watchdog de auto-recuperación activa de datos del volante ante ruidos electromagnéticos
-    uint32_t current_time = board_millis();
-    if (wheel_device && (current_time - last_wheel_report_time >= 100)) {
-        last_wheel_report_time = current_time;
-        tuh_hid_receive_report(wheel_device, wheel_instance);
-    }
-
     // Combinación física real para el botón PS (L3 + R3)
     report.PS = report.L3 && report.R3;
     if (memcmp(&prev_report, &report, sizeof(report))) {
@@ -126,52 +117,33 @@ void wheel_init_task() {
 }
 
 void auth_task() {
-    if (!auth_device) return;
+    if (!auth_device || busy) return;
 
-    uint32_t current_time = board_millis();
-
-    // Sistema de auto-recuperación ante pérdida de paquetes (Timeout de 2000ms)
-    if (busy && (current_time - auth_timer >= 2000)) {
-        busy = false;
-        if (state == SENDING_NONCE && nonce_part > 0) {
-            nonce_part--; 
-        }
-        if (state == RECEIVING_SIG && signature_part > 0) {
-            signature_part--; 
-        }
-    }
-
-    if (!busy) {
-        switch (state) {
-            case IDLE:
-                break;
-            case SENDING_RESET:
-                tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
-                busy = true;
-                auth_timer = current_time;
-                break;
-            case SENDING_NONCE:
-                set_buffer[0] = 0xF0;
-                set_buffer[1] = nonce_id;
-                set_buffer[2] = nonce_part;
-                set_buffer[3] = 0;
-                memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
-                tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
-                busy = true;
-                auth_timer = current_time;
-                nonce_part++;
-                break;
-            case WAITING_FOR_SIG:
-                tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
-                busy = true;
-                auth_timer = current_time;
-                break;
-            case RECEIVING_SIG:
-                tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
-                busy = true;
-                auth_timer = current_time;
-                break;
-        }
+    switch (state) {
+        case IDLE:
+            break;
+        case SENDING_RESET:
+            tuh_hid_get_report(auth_device, auth_instance, 0xF3, HID_REPORT_TYPE_FEATURE, get_buffer, 7 + 1);
+            busy = true;
+            break;
+        case SENDING_NONCE:
+            set_buffer[0] = 0xF0;
+            set_buffer[1] = nonce_id;
+            set_buffer[2] = nonce_part;
+            set_buffer[3] = 0;
+            memcpy(set_buffer + 4, nonce + (nonce_part * 56), 56);
+            tuh_hid_set_report(auth_device, auth_instance, 0xF0, HID_REPORT_TYPE_FEATURE, set_buffer, 64);
+            busy = true;
+            nonce_part++;
+            break;
+        case WAITING_FOR_SIG:
+            tuh_hid_get_report(auth_device, auth_instance, 0xF2, HID_REPORT_TYPE_FEATURE, get_buffer, 15 + 1);
+            busy = true;
+            break;
+        case RECEIVING_SIG:
+            tuh_hid_get_report(auth_device, auth_instance, 0xF1, HID_REPORT_TYPE_FEATURE, get_buffer, 63 + 1);
+            busy = true;
+            break;
     }
 }
 
@@ -297,7 +269,6 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
         wheel_device = dev_addr;
         wheel_instance = instance; 
         wheel_pid = pid;
-        last_wheel_report_time = board_millis(); // Inicializa el temporizador del Watchdog
         tuh_hid_receive_report(dev_addr, instance);
         initialized = false;
         calibration_done = false;
@@ -322,9 +293,6 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report_, uint16_t len) {
     if (len > 0 && dev_addr == wheel_device) {
-        // Marcamos la hora del último reporte de datos analógicos recibido con éxito del volante
-        last_wheel_report_time = board_millis();
-
         if (wheel_pid == 0xc294) {
             df_report_t* df = (df_report_t*) report_;
             report.wheel = df->wheel << 6;
@@ -351,30 +319,12 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             // =================================================================
 
             // 1. DIRECCIÓN
-            uint16_t raw_steering = report_[3] | (report_[4] << 8);
-            report.wheel = raw_steering;
+            report.wheel = report_[3] | (report_[4] << 8);
 
-            // 2. PEDALES DE CARRERA CON FILTRADO COMPLETO DE RUIDO ANALÓGICO EN REPOSO
-            // Acelerador
-            if (report_[5] >= 0xFA) {
-                report.throttle = 0xFFFF;
-            } else {
-                report.throttle = report_[5] << 8;
-            }
-
-            // Freno
-            if (report_[6] >= 0xFA) {
-                report.brake = 0xFFFF;
-            } else {
-                report.brake = report_[6] << 8;
-            }
-
-            // Embrague
-            if (report_[7] >= 0xFA) {
-                report.clutch = 0xFFFF; 
-            } else {
-                report.clutch = report_[7] << 8; 
-            }
+            // 2. PEDALES DE CARRERA CON TRADUCCIÓN DIRECTA DE HARDWARE (MÁXIMA VELOCIDAD)
+            report.throttle = report_[5] << 8;
+            report.brake    = report_[6] << 8;
+            report.clutch   = report_[7] << 8; 
 
             // 3. CRUCETA (D-PAD)
             uint8_t hat = report_[0] & 0x0F;
