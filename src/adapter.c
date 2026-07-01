@@ -336,23 +336,36 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.circle   = (report_[0] & 0x40) ? 1 : 0; 
             report.triangle = (report_[0] & 0x80) ? 1 : 0; 
 
-            // 5. BOTONES Y LEVAS DEL VOLANTE (Duplicados con la palanca física)
-            // L1 se activa con la Leva Derecha (0x02) O empujando la palanca secuencial (0x81) O en 1ª marcha de patrón H (0x01)
-            bool push_forward = (report_[2] == 0x81) || (report_[2] == 0x01);
-            report.L1       = ((report_[1] & 0x02) || push_forward) ? 1 : 0;
+            // 5. BOTONES Y LEVAS DEL VOLANTE (Duplicados en secuencial con L1 y R1)
+            // L1 se activa con la Leva Derecha (0x02) O empujando la palanca secuencial (0x81)
+            bool seq_forward = (report_[2] == 0x81);
+            report.L1       = ((report_[1] & 0x02) || seq_forward) ? 1 : 0;
 
-            // R1 se activa con la Leva Izquierda (0x01) O tirando de la palanca secuencial (0x82) O en 2ª marcha de patrón H (0x02)
-            bool pull_backward = (report_[2] == 0x82) || (report_[2] == 0x02);
-            report.R1       = ((report_[1] & 0x01) || pull_backward) ? 1 : 0;
+            // R1 se activa con la Leva Izquierda (0x01) O tirando de la palanca secuencial (0x82)
+            bool seq_backward = (report_[2] == 0x82);
+            report.R1       = ((report_[1] & 0x01) || seq_backward) ? 1 : 0;
 
             report.R2       = (report_[1] & 0x04) ? 1 : 0; 
             report.L2       = (report_[1] & 0x08) ? 1 : 0; 
 
-            // 6. TRADUCCIÓN DE BOTONES ROJOS DE LA BOTONERA (L3 y R3 vuelven a sus botones originales)
+            // 6. TRADUCCIÓN DE BOTONES ROJOS DE LA PALANCA
             report.select   = (report_[1] & 0x80) ? 1 : 0; 
             report.start    = (report_[1] & 0x40) ? 1 : 0; 
             report.L3       = (report_[1] & 0x10) ? 1 : 0; // Botón Rojo 2 -> L3
             report.R3       = (report_[1] & 0x20) ? 1 : 0; // Botón Rojo 3 -> R3
+
+            // 7. TRADUCCIÓN DE LA PALANCA EN MODO PATRÓN H (Byte 50 del G29)
+            uint8_t gears_g29 = 0;
+            uint8_t gears_g25 = report_[2];
+
+            // Si no estamos en modo secuencial (es decir, el bit de modo 0x80 está apagado)
+            if (!(gears_g25 & 0x80)) {
+                gears_g29 = gears_g25 & 0x3F; // Copia directa de marchas 1 a 6 (bits 0 al 5)
+                if (gears_g25 & 0x40) {
+                    gears_g29 |= 0x80; // Mapea la reversa del G25 (bit 6) al bit de reversa G29 (bit 7)
+                }
+            }
+            report.whatever2[0] = gears_g29;
         }
     }
 
