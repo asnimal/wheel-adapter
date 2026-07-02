@@ -336,15 +336,9 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             report.circle   = (report_[0] & 0x40) ? 1 : 0; 
             report.triangle = (report_[0] & 0x80) ? 1 : 0; 
 
-            // 5. BOTONES Y LEVAS DEL VOLANTE (Duplicados en secuencial con L1 y R1)
-            // L1 se activa con la Leva Derecha (0x02) O empujando la palanca secuencial (0x81)
-            bool seq_forward = (report_[2] == 0x81);
-            report.L1       = ((report_[1] & 0x02) || seq_forward) ? 1 : 0;
-
-            // R1 se activa con la Leva Izquierda (0x01) O tirando de la palanca secuencial (0x82)
-            bool seq_backward = (report_[2] == 0x82);
-            report.R1       = ((report_[1] & 0x01) || seq_backward) ? 1 : 0;
-
+            // 5. BOTONES Y LEVAS DEL VOLANTE (Normales, independientes de la palanca)
+            report.R1       = (report_[1] & 0x01) ? 1 : 0; // Leva Izquierda física -> R1 (Bajar marcha)
+            report.L1       = (report_[1] & 0x02) ? 1 : 0; // Leva Derecha física -> L1 (Subir marcha)
             report.R2       = (report_[1] & 0x04) ? 1 : 0; 
             report.L2       = (report_[1] & 0x08) ? 1 : 0; 
 
@@ -366,6 +360,18 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
                 }
             }
             report.whatever2[0] = gears_g29;
+
+            // 8. TRADUCCIÓN DE LA PALANCA EN MODO SECUENCIAL (Byte 53 del G29, botones +/-)
+            uint8_t dial_buttons = 0;
+            if (gears_g25 & 0x80) { // Si el interruptor de modo secuencial del G25 está activo
+                if (gears_g25 == 0x81) {
+                    dial_buttons |= 0x02; // Empujar hacia adelante -> Botón "-" (Minus) del G29 (bit 1)
+                }
+                else if (gears_g25 == 0x82) {
+                    dial_buttons |= 0x04; // Tirar hacia atrás -> Botón "+" (Plus) del G29 (bit 2)
+                }
+            }
+            report.whatever2[3] = dial_buttons;
         }
     }
 
